@@ -1,14 +1,15 @@
 use std::io::Write;
-
-use hmac::{Hmac, Mac};
-use sha1::Digest;
+extern crate hmac;
+extern crate sha1;
+use self::hmac::{Hmac, Mac};
+use self::sha1::Digest;
 pub trait VHeader {
     fn get(&self, key: &str) -> Option<String>;
     fn set(&mut self, key: &str, val: &str);
     fn delete(&mut self, key: &str);
     fn rng(&self, cb: impl FnMut(&str, &str) -> bool);
 }
-use crate::{GenericResult, error::Error};
+use crate::{error::Error, GenericResult};
 
 fn get_v4_signature<T: VHeader>(
     req: &T,
@@ -148,8 +149,8 @@ impl HmacSha256CircleHasher {
 #[cfg(test)]
 mod v4test {
     use std::{collections::HashMap, io::Write};
-
-    use sha1::Digest;
+    extern crate sha1;
+    use self::sha1::Digest;
 
     use crate::GenericResult;
 

@@ -1,4 +1,4 @@
-use hmac::{Hmac, Mac};
+extern crate hmac;use self::hmac::{Hmac, Mac};
 
 use crate::GenericResult;
 use crate::error::Error;
