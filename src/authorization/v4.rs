@@ -15,6 +15,7 @@ fn get_v4_signature<T: VHeader>(
     req: &T,
     method: &str,
     region: &str,
+    service:&str,
     url_path: &str,
     secretkey: &str,
     content_hash: &str,
@@ -58,7 +59,7 @@ fn get_v4_signature<T: VHeader>(
     let canonical_hsh = hex::encode(ans);
 
     let tosign = format!(
-        "AWS4-HMAC-SHA256\n{}\n{}/{region}/s3/aws4_request\n{canonical_hsh}",
+        "AWS4-HMAC-SHA256\n{}\n{}/{region}/{service}/aws4_request\n{canonical_hsh}",
         xamz_date,
         xamz_date[..8].to_string()
     );
@@ -189,6 +190,7 @@ mod v4test {
             &hm,
             "GET",
             "us-east-1",
+            "s3",
             "/",
             "root12345",
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -213,6 +215,7 @@ mod v4test {
             &hm,
             "PUT",
             "us-east-1",
+            "s3",
             "/test/hello.txt",
             "root12345",
             "STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
@@ -241,6 +244,7 @@ mod v4test {
             &hm,
             "GET",
             "us-east-1",
+            "s3",
             "/test/",
             "root12345",
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -271,6 +275,7 @@ mod v4test {
             &hm,
             "PUT",
             "us-east-1",
+            "s3",
             "/test/hello.txt",
             "root12345",
             "STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
