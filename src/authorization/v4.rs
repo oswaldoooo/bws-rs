@@ -18,17 +18,27 @@ fn get_v4_signature<T: VHeader>(
     url_path: &str,
     secretkey: &str,
     content_hash: &str,
+    signed_headers: &[&str],
 ) -> GenericResult<String> {
     let xamz_date = req.get("x-amz-date");
     if xamz_date.is_none() {
         return Err(Box::new(Error::Illegal));
     }
     let xamz_date = xamz_date.unwrap();
-    let (ans, keyans) = get_sorted_headers(req);
+    let ans: Vec<String> = signed_headers
+        .iter()
+        .map(|v| {
+            let val = req.get(*v);
+            match val {
+                Some(val) => format!("{}:{val}",*v),
+                None => format!("{}:",*v),
+            }
+        })
+        .collect();
     let tosign = format!(
         "{method}\n{url_path}\n\n{}\n\n{}\n{}",
         ans.join("\n").to_string(),
-        keyans.join(";").to_string(),
+        signed_headers.join(";").to_string(),
         content_hash
     );
     let ksign = get_v4_ksigning(secretkey, region, &xamz_date)?;
@@ -91,24 +101,6 @@ fn circle_hmac_sha256(initkey: &str, values: &[&[u8]], target: &mut [u8]) -> Gen
     }
     (&mut target[0..next.len()]).copy_from_slice(&next);
     Ok(())
-}
-fn get_sorted_headers<T: VHeader>(headers: &T) -> (Vec<String>, Vec<String>) {
-    let mut ans = vec![];
-    let mut keyans = vec![];
-    let keyansref = &mut keyans;
-    headers.rng(|k, _| {
-        if k != "host" && !k.starts_with("x-amz-") {
-            return true;
-        }
-        keyansref.push(k.to_string());
-        true
-    });
-    keyans.sort();
-    for k in keyans.iter() {
-        let val = headers.get(&k).unwrap();
-        ans.push(format!("{k}:{val}"));
-    }
-    (ans, keyans)
 }
 
 pub struct HmacSha256CircleHasher {
@@ -193,10 +185,11 @@ mod v4test {
             "/",
             "root12345",
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            &["host", "x-amz-content-sha256", "x-amz-date"],
         )?;
         assert!(
             signature == "2e3e50b8ab771944088edcda925d886a078ec2442e8504f58e1ac3ef8a2f40fc",
-            "expect 2e3e50b8ab771944088edcda925d886a078ec2442e8504f58e1ac3ef8a2f40fc, get {signature}"
+            "expect 2e3e50b8ab771944088edcda925d886a078ec2442e8504f58e1ac3ef8a2f40fc, get {}",signature,
         );
         //case2
         let mut hm = HashMap::new();
@@ -214,10 +207,11 @@ mod v4test {
             "/test/hello.txt",
             "root12345",
             "STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
+            &["host", "x-amz-content-sha256", "x-amz-date","x-amz-decoded-content-length"]
         )?;
         assert!(
             signature == "ae05fb994613c1a72e9f1d3bf14de119155587b955ca7d5589a056e7ffab680f",
-            "expect ae05fb994613c1a72e9f1d3bf14de119155587b955ca7d5589a056e7ffab680f,get {signature}"
+            "expect ae05fb994613c1a72e9f1d3bf14de119155587b955ca7d5589a056e7ffab680f,get {}",signature
         );
         Ok(())
     }
@@ -238,6 +232,7 @@ mod v4test {
             "/test/hello.txt",
             "root12345",
             "STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
+            &["host", "x-amz-content-sha256", "x-amz-date","x-amz-decoded-content-length"]
         )?;
         let ksigning = super::get_v4_ksigning("root12345", "us-east-1", "20250407T060526Z")?;
 
@@ -253,13 +248,13 @@ mod v4test {
         let hsh = hsch.next(hex::encode(ans).as_str())?;
         assert!(
             hsh == "fe78329ef4be9a33af1ffb23c435cf9d985c79dc65911ac78a66317f5a0521bb",
-            "expect fe78329ef4be9a33af1ffb23c435cf9d985c79dc65911ac78a66317f5a0521bb,get {hsh}"
+            "expect fe78329ef4be9a33af1ffb23c435cf9d985c79dc65911ac78a66317f5a0521bb,get {}",hsh
         );
         let final_chunk_hsh =
             hsch.next("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")?;
         assert!(
             final_chunk_hsh == "9095844b0da3ae2e9fe65b372662c4beadfc38ebe5a709b16ea9b03d427d03ad",
-            "expect 9095844b0da3ae2e9fe65b372662c4beadfc38ebe5a709b16ea9b03d427d03ad,get {final_chunk_hsh}"
+            "expect 9095844b0da3ae2e9fe65b372662c4beadfc38ebe5a709b16ea9b03d427d03ad,get {}",final_chunk_hsh
         );
         Ok(())
     }
