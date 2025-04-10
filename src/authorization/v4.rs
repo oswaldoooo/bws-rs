@@ -19,6 +19,7 @@ fn get_v4_signature<T: VHeader>(
     secretkey: &str,
     content_hash: &str,
     signed_headers: &[&str],
+    mut query: Vec<crate::utils::BaseKv<String, String>>,
 ) -> GenericResult<String> {
     let xamz_date = req.get("x-amz-date");
     if xamz_date.is_none() {
@@ -30,13 +31,19 @@ fn get_v4_signature<T: VHeader>(
         .map(|v| {
             let val = req.get(*v);
             match val {
-                Some(val) => format!("{}:{val}",*v),
-                None => format!("{}:",*v),
+                Some(val) => format!("{}:{val}", *v),
+                None => format!("{}:", *v),
             }
         })
         .collect();
+    query.sort_by(|a, b| (&a.key).cmp(&b.key));
+    let query: Vec<String> = query
+        .iter()
+        .map(|v| format!("{}={}", v.key, v.val))
+        .collect();
     let tosign = format!(
-        "{method}\n{url_path}\n\n{}\n\n{}\n{}",
+        "{method}\n{url_path}\n{}\n{}\n\n{}\n{}",
+        query.join("&"),
         ans.join("\n").to_string(),
         signed_headers.join(";").to_string(),
         content_hash
@@ -144,7 +151,7 @@ mod v4test {
     extern crate sha1;
     use self::sha1::Digest;
 
-    use crate::GenericResult;
+    use crate::{utils::BaseKv, GenericResult};
 
     use super::VHeader;
     impl VHeader for HashMap<String, String> {
@@ -186,10 +193,12 @@ mod v4test {
             "root12345",
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             &["host", "x-amz-content-sha256", "x-amz-date"],
+            vec![],
         )?;
         assert!(
             signature == "2e3e50b8ab771944088edcda925d886a078ec2442e8504f58e1ac3ef8a2f40fc",
-            "expect 2e3e50b8ab771944088edcda925d886a078ec2442e8504f58e1ac3ef8a2f40fc, get {}",signature,
+            "expect 2e3e50b8ab771944088edcda925d886a078ec2442e8504f58e1ac3ef8a2f40fc, get {}",
+            signature,
         );
         //case2
         let mut hm = HashMap::new();
@@ -207,11 +216,44 @@ mod v4test {
             "/test/hello.txt",
             "root12345",
             "STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
-            &["host", "x-amz-content-sha256", "x-amz-date","x-amz-decoded-content-length"]
+            &[
+                "host",
+                "x-amz-content-sha256",
+                "x-amz-date",
+                "x-amz-decoded-content-length",
+            ],
+            vec![],
         )?;
         assert!(
             signature == "ae05fb994613c1a72e9f1d3bf14de119155587b955ca7d5589a056e7ffab680f",
-            "expect ae05fb994613c1a72e9f1d3bf14de119155587b955ca7d5589a056e7ffab680f,get {}",signature
+            "expect ae05fb994613c1a72e9f1d3bf14de119155587b955ca7d5589a056e7ffab680f,get {}",
+            signature
+        );
+        //case3
+        let mut hm = HashMap::new();
+        hm.insert("x-amz-date".to_string(), "20250410T124056Z".to_string());
+        hm.insert(
+            "x-amz-content-sha256".to_string(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+        );
+        hm.insert("host".to_string(), "127.0.0.1:9000".to_string());
+        let signature = super::get_v4_signature(
+            &hm,
+            "GET",
+            "us-east-1",
+            "/test/",
+            "root12345",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            &["host", "x-amz-content-sha256", "x-amz-date"],
+            vec![BaseKv {
+                key: "location".to_string(),
+                val: "".to_string(),
+            }],
+        )?;
+        assert!(
+            signature == "f51cf31bf489474692475a74706f9382c7ba0e93e0d657dc9696efa83fc3906a",
+            "expect f51cf31bf489474692475a74706f9382c7ba0e93e0d657dc9696efa83fc3906a, get {}",
+            signature,
         );
         Ok(())
     }
@@ -232,7 +274,13 @@ mod v4test {
             "/test/hello.txt",
             "root12345",
             "STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
-            &["host", "x-amz-content-sha256", "x-amz-date","x-amz-decoded-content-length"]
+            &[
+                "host",
+                "x-amz-content-sha256",
+                "x-amz-date",
+                "x-amz-decoded-content-length",
+            ],
+            vec![],
         )?;
         let ksigning = super::get_v4_ksigning("root12345", "us-east-1", "20250407T060526Z")?;
 
@@ -248,13 +296,15 @@ mod v4test {
         let hsh = hsch.next(hex::encode(ans).as_str())?;
         assert!(
             hsh == "fe78329ef4be9a33af1ffb23c435cf9d985c79dc65911ac78a66317f5a0521bb",
-            "expect fe78329ef4be9a33af1ffb23c435cf9d985c79dc65911ac78a66317f5a0521bb,get {}",hsh
+            "expect fe78329ef4be9a33af1ffb23c435cf9d985c79dc65911ac78a66317f5a0521bb,get {}",
+            hsh
         );
         let final_chunk_hsh =
             hsch.next("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")?;
         assert!(
             final_chunk_hsh == "9095844b0da3ae2e9fe65b372662c4beadfc38ebe5a709b16ea9b03d427d03ad",
-            "expect 9095844b0da3ae2e9fe65b372662c4beadfc38ebe5a709b16ea9b03d427d03ad,get {}",final_chunk_hsh
+            "expect 9095844b0da3ae2e9fe65b372662c4beadfc38ebe5a709b16ea9b03d427d03ad,get {}",
+            final_chunk_hsh
         );
         Ok(())
     }
