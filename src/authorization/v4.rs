@@ -4,10 +4,10 @@ extern crate sha1;
 use self::hmac::{Hmac, Mac};
 use self::sha1::Digest;
 pub trait VHeader {
-    fn get(&self, key: &str) -> Option<String>;
-    fn set(&mut self, key: &str, val: &str);
-    fn delete(&mut self, key: &str);
-    fn rng(&self, cb: impl FnMut(&str, &str) -> bool);
+    fn get_header(&self, key: &str) -> Option<String>;
+    fn set_header(&mut self, key: &str, val: &str);
+    fn delete_header(&mut self, key: &str);
+    fn rng_header(&self, cb: impl FnMut(&str, &str) -> bool);
 }
 use crate::{error::Error, GenericResult};
 
@@ -22,7 +22,7 @@ fn get_v4_signature<T: VHeader>(
     signed_headers: &[&str],
     mut query: Vec<crate::utils::BaseKv<String, String>>,
 ) -> GenericResult<String> {
-    let xamz_date = req.get("x-amz-date");
+    let xamz_date = req.get_header("x-amz-date");
     if xamz_date.is_none() {
         return Err(Box::new(Error::Illegal));
     }
@@ -30,7 +30,7 @@ fn get_v4_signature<T: VHeader>(
     let ans: Vec<String> = signed_headers
         .iter()
         .map(|v| {
-            let val = req.get(*v);
+            let val = req.get_header(*v);
             match val {
                 Some(val) => format!("{}:{val}", *v),
                 None => format!("{}:", *v),
@@ -156,7 +156,7 @@ mod v4test {
 
     use super::VHeader;
     impl VHeader for HashMap<String, String> {
-        fn get(&self, key: &str) -> Option<String> {
+        fn get_header(&self, key: &str) -> Option<String> {
             let ans = self.get(key);
             match ans {
                 Some(ans) => Some(ans.clone()),
@@ -164,15 +164,15 @@ mod v4test {
             }
         }
 
-        fn set(&mut self, key: &str, val: &str) {
+        fn set_header(&mut self, key: &str, val: &str) {
             self.insert(key.to_string(), val.to_string());
         }
 
-        fn delete(&mut self, key: &str) {
+        fn delete_header(&mut self, key: &str) {
             self.remove(key);
         }
 
-        fn rng(&self, mut cb: impl FnMut(&str, &str) -> bool) {
+        fn rng_header(&self, mut cb: impl FnMut(&str, &str) -> bool) {
             self.iter().all(|(k, v)| cb(&k, &v));
         }
     }

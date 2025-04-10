@@ -1,4 +1,4 @@
-pub mod authorization;pub mod error;mod utils;
+pub mod authorization;pub mod error;mod utils;pub mod service;
 
 pub type GenericResult<T>=Result<T,Box<dyn std::error::Error>>;
 
