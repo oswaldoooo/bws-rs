@@ -1,5 +1,5 @@
 use std::{io::Write, sync::Mutex};
-
+static OwnerId: &'static str = "ffffffffffffffff";
 pub trait VRequest: crate::authorization::v4::VHeader {
     fn method(&self) -> String;
     fn url_path(&self) -> String;
@@ -243,6 +243,54 @@ pub fn handle_get_list_object<T: VRequest, F: VResponse, E: ListObjectHandler>(
     .unwrap_or_else(|e| log::info!("list_bucket_handle error: {e}"));
 }
 
+pub trait ListBucketHandler {
+    fn handle(&self, opt: &ListBucketsOption) -> Result<Vec<Bucket>, Box<dyn std::error::Error>>;
+}
+#[derive(Debug)]
+pub struct ListBucketsOption {
+    pub bucket_region: Option<String>,
+    pub continuation_token: Option<String>,
+    pub max_buckets: Option<i32>,
+    pub prefix: Option<String>,
+}
+pub fn handle_get_list_buckets<T: VRequest, F: VResponse, E: ListBucketHandler>(
+    req: &T,
+    resp: &mut F,
+    handler: &E,
+) {
+    let opt = ListBucketsOption {
+        bucket_region: req.get_query("bucket-region"),
+        continuation_token: req.get_query("continuation-token"),
+        max_buckets: req.get_query("max-buckets").map_or(None, |v| {
+            i32::from_str_radix(&v, 10).map_or(None, |v| Some(v))
+        }),
+        prefix: req.get_query("prefix"),
+    };
+    handler.handle(&opt).map_or_else(
+        |e| log::info!("listbucket handle error: {e}"),
+        |v| {
+            let res = ListAllMyBucketsResult {
+                xmlns: r#"xmlns="http://s3.amazonaws.com/doc/2006-03-01/""#.to_string(),
+                owner: Owner {
+                    id: OwnerId.to_string(),
+                    display_name: "bws".to_string(),
+                },
+                buckets: Buckets { bucket: v },
+            };
+            quick_xml::se::to_string(&res).map_or_else(
+                |e| log::error!("xml serde error: {e}"),
+                |v| {
+                    resp.get_body_writer().map_or_else(
+                        |e| log::error!("get_body_writer error: {e}"),
+                        |mut w| {
+                            let _ = w.write_all(v.as_bytes());
+                        },
+                    );
+                },
+            );
+        },
+    );
+}
 pub struct PutObjectOption {}
 pub trait PutObjectHandler {
     fn handle(
@@ -466,6 +514,26 @@ mod req_test {
         }
     }
 
+    impl super::ListBucketHandler for ListBucket {
+        fn handle(
+            &self,
+            opt: &super::ListBucketsOption,
+        ) -> Result<Vec<super::Bucket>, Box<dyn std::error::Error>> {
+            let date = chrono::Utc::now().to_rfc2822();
+            Ok(self
+                .0
+                .iter()
+                .map(|v| super::Bucket {
+                    name: v
+                        .find('/')
+                        .map_or(v.clone(), |next| (&v[..next]).to_string()),
+                    creation_date: date.clone(),
+                    bucket_region: "us-east-1".to_string(),
+                })
+                .collect())
+        }
+    }
+
     #[test]
     fn list_object() {
         let lb = ListBucket(vec![
@@ -487,5 +555,31 @@ mod req_test {
             body: vec![],
         };
         super::handle_get_list_object(&req, &mut resp, &lb);
+        String::from_utf8(resp.body)
+            .map_or_else(|e| eprintln!("not ascii {e}"), |v| println!("{v}"));
+    }
+    #[test]
+    fn list_buckets() {
+        let mut hm = HashMap::default();
+        let req = HttpRequest {
+            url_path: "/".to_string(),
+            query: vec![],
+            method: "GET".to_string(),
+            headers: hm,
+        };
+        let mut resp = HttpResponse {
+            status: 0,
+            headers: HashMap::default(),
+            body: vec![],
+        };
+        let lb = ListBucket(vec![
+            "test/hello.txt".to_string(),
+            "test/test.dat".to_string(),
+            "one/jack.json".to_string(),
+            "one/jim.json".to_string(),
+        ]);
+        super::handle_get_list_buckets(&req, &mut resp, &lb);
+        String::from_utf8(resp.body)
+            .map_or_else(|e| eprintln!("not ascii {e}"), |v| println!("{v}"));
     }
 }
