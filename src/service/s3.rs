@@ -1,5 +1,23 @@
-use std::{io::Write, sync::Mutex};
+use std::{
+    fmt::{Debug, Display},
+    io::Write,
+    str::FromStr,
+    sync::Mutex,
+};
 static OwnerId: &'static str = "ffffffffffffffff";
+
+pub struct Error(String);
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl Debug for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Error").field(&self.0).finish()
+    }
+}
+impl std::error::Error for Error {}
 pub trait VRequest: crate::authorization::v4::VHeader {
     fn method(&self) -> String;
     fn url_path(&self) -> String;
@@ -185,7 +203,7 @@ pub fn handle_get_list_object<T: VRequest, F: VResponse, E: ListObjectHandler>(
     resp: &mut F,
     handler: &E,
 ) {
-    if req.method()!="GET"{
+    if req.method() != "GET" {
         resp.set_status(405);
         resp.send_header();
         return;
@@ -263,7 +281,7 @@ pub fn handle_get_list_buckets<T: VRequest, F: VResponse, E: ListBucketHandler>(
     resp: &mut F,
     handler: &E,
 ) {
-    if req.method()!="GET"{
+    if req.method() != "GET" {
         resp.set_status(405);
         resp.send_header();
         return;
@@ -338,7 +356,220 @@ pub fn handle_delete_object<T: VRequest, F: VResponse, E: DeleteObjectHandler>(
         );
 }
 
-pub struct CreateBucketOption {}
+pub struct CreateBucketOption {
+    pub grant_full_control: Option<String>,
+    pub grant_read: Option<String>,
+    pub grant_read_acp: Option<String>,
+    pub grant_write: Option<String>,
+    pub grant_write_acp: Option<String>,
+    pub object_lock_enabled_for_bucket: Option<bool>,
+    pub object_ownership: Option<ObjectOwnership>,
+}
+pub enum ObjectOwnership {
+    BucketOwnerPreferred,
+    ObjectWriter,
+    BucketOwnerEnforced,
+}
+impl FromStr for ObjectOwnership {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "BucketOwnerPreferred" => Ok(ObjectOwnership::BucketOwnerPreferred),
+            "ObjectWriter" => Ok(ObjectOwnership::ObjectWriter),
+            "BucketOwnerEnforced" => Ok(ObjectOwnership::BucketOwnerEnforced),
+            _ => Err(Error(s.to_string())),
+        }
+    }
+}
+pub struct CreateBucketConfiguration {
+    pub bucket: Option<BucketInfo>,
+    pub location: Option<LocationInfo>,
+    pub location_constraint: Option<BucketLocationConstraint>,
+}
+pub struct BucketInfo {
+    pub data_redundancy: DataRedundancy,
+    pub bucket_type: BucketType,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DataRedundancy {
+    SingleAvailabilityZone,
+    SingleLocalZone,
+    Unknown(String),
+}
+
+impl From<&str> for DataRedundancy {
+    fn from(s: &str) -> Self {
+        match s {
+            "SingleAvailabilityZone" => Self::SingleAvailabilityZone,
+            "SingleLocalZone" => Self::SingleLocalZone,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+}
+
+impl ToString for DataRedundancy {
+    fn to_string(&self) -> String {
+        match self {
+            Self::SingleAvailabilityZone => "SingleAvailabilityZone".to_string(),
+            Self::SingleLocalZone => "SingleLocalZone".to_string(),
+            Self::Unknown(s) => s.clone(),
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BucketType {
+    Directory,
+    Unknown(String),
+}
+
+impl From<&str> for BucketType {
+    fn from(s: &str) -> Self {
+        match s {
+            "Directory" => Self::Directory,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+}
+
+impl ToString for BucketType {
+    fn to_string(&self) -> String {
+        match self {
+            Self::Directory => "Directory".to_string(),
+            Self::Unknown(s) => s.clone(),
+        }
+    }
+}
+
+pub struct LocationInfo {
+    pub name: Option<String>,
+    pub location_type: LocationType,
+}
+
+pub enum LocationType {
+    AvailabilityZone,
+    LocalZone,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BucketLocationConstraint {
+    AfSouth1,
+    ApEast1,
+    ApNortheast1,
+    ApNortheast2,
+    ApNortheast3,
+    ApSouth1,
+    ApSouth2,
+    ApSoutheast1,
+    ApSoutheast2,
+    ApSoutheast3,
+    ApSoutheast4,
+    ApSoutheast5,
+    CaCentral1,
+    CnNorth1,
+    CnNorthwest1,
+    Eu,
+    EuCentral1,
+    EuCentral2,
+    EuNorth1,
+    EuSouth1,
+    EuSouth2,
+    EuWest1,
+    EuWest2,
+    EuWest3,
+    IlCentral1,
+    MeCentral1,
+    MeSouth1,
+    SaEast1,
+    UsEast2,
+    UsGovEast1,
+    UsGovWest1,
+    UsWest1,
+    UsWest2,
+    Unknown(String),
+}
+impl From<&str> for BucketLocationConstraint {
+    fn from(s: &str) -> Self {
+        match s {
+            "af-south-1" => Self::AfSouth1,
+            "ap-east-1" => Self::ApEast1,
+            "ap-northeast-1" => Self::ApNortheast1,
+            "ap-northeast-2" => Self::ApNortheast2,
+            "ap-northeast-3" => Self::ApNortheast3,
+            "ap-south-1" => Self::ApSouth1,
+            "ap-south-2" => Self::ApSouth2,
+            "ap-southeast-1" => Self::ApSoutheast1,
+            "ap-southeast-2" => Self::ApSoutheast2,
+            "ap-southeast-3" => Self::ApSoutheast3,
+            "ap-southeast-4" => Self::ApSoutheast4,
+            "ap-southeast-5" => Self::ApSoutheast5,
+            "ca-central-1" => Self::CaCentral1,
+            "cn-north-1" => Self::CnNorth1,
+            "cn-northwest-1" => Self::CnNorthwest1,
+            "EU" => Self::Eu,
+            "eu-central-1" => Self::EuCentral1,
+            "eu-central-2" => Self::EuCentral2,
+            "eu-north-1" => Self::EuNorth1,
+            "eu-south-1" => Self::EuSouth1,
+            "eu-south-2" => Self::EuSouth2,
+            "eu-west-1" => Self::EuWest1,
+            "eu-west-2" => Self::EuWest2,
+            "eu-west-3" => Self::EuWest3,
+            "il-central-1" => Self::IlCentral1,
+            "me-central-1" => Self::MeCentral1,
+            "me-south-1" => Self::MeSouth1,
+            "sa-east-1" => Self::SaEast1,
+            "us-east-2" => Self::UsEast2,
+            "us-gov-east-1" => Self::UsGovEast1,
+            "us-gov-west-1" => Self::UsGovWest1,
+            "us-west-1" => Self::UsWest1,
+            "us-west-2" => Self::UsWest2,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+}
+
+impl ToString for BucketLocationConstraint {
+    fn to_string(&self) -> String {
+        match self {
+            Self::AfSouth1 => "af-south-1",
+            Self::ApEast1 => "ap-east-1",
+            Self::ApNortheast1 => "ap-northeast-1",
+            Self::ApNortheast2 => "ap-northeast-2",
+            Self::ApNortheast3 => "ap-northeast-3",
+            Self::ApSouth1 => "ap-south-1",
+            Self::ApSouth2 => "ap-south-2",
+            Self::ApSoutheast1 => "ap-southeast-1",
+            Self::ApSoutheast2 => "ap-southeast-2",
+            Self::ApSoutheast3 => "ap-southeast-3",
+            Self::ApSoutheast4 => "ap-southeast-4",
+            Self::ApSoutheast5 => "ap-southeast-5",
+            Self::CaCentral1 => "ca-central-1",
+            Self::CnNorth1 => "cn-north-1",
+            Self::CnNorthwest1 => "cn-northwest-1",
+            Self::Eu => "EU",
+            Self::EuCentral1 => "eu-central-1",
+            Self::EuCentral2 => "eu-central-2",
+            Self::EuNorth1 => "eu-north-1",
+            Self::EuSouth1 => "eu-south-1",
+            Self::EuSouth2 => "eu-south-2",
+            Self::EuWest1 => "eu-west-1",
+            Self::EuWest2 => "eu-west-2",
+            Self::EuWest3 => "eu-west-3",
+            Self::IlCentral1 => "il-central-1",
+            Self::MeCentral1 => "me-central-1",
+            Self::MeSouth1 => "me-south-1",
+            Self::SaEast1 => "sa-east-1",
+            Self::UsEast2 => "us-east-2",
+            Self::UsGovEast1 => "us-gov-east-1",
+            Self::UsGovWest1 => "us-gov-west-1",
+            Self::UsWest1 => "us-west-1",
+            Self::UsWest2 => "us-west-2",
+            Self::Unknown(s) => s,
+        }
+        .to_string()
+    }
+}
+
 pub trait CreateBucketHandler {
     fn handle(
         &self,
@@ -351,20 +582,45 @@ fn handle_create_bucket<T: VRequest, F: VResponse, E: CreateBucketHandler>(
     resp: &mut F,
     handler: &E,
 ) {
-    let opt = CreateBucketOption {};
-    let url_path = req.url_path();
-    handler
-        .handle(&opt, url_path.trim_matches('/'))
-        .map_or_else(
-            |e| {
-                resp.set_status(500);
-                log::info!("delete object handler error: {e}")
+    if req.method() != "PUT" {
+        resp.set_status(405);
+        resp.send_header();
+        return;
+    }
+    let opt = CreateBucketOption {
+        grant_full_control: req.get_header("x-amz-grant-full-control"),
+        grant_read: req.get_header("x-amz-grant-read"),
+        grant_read_acp: req.get_header("x-amz-grant-read-acp"),
+        grant_write: req.get_header("x-amz-grant-write"),
+        grant_write_acp: req.get_header("x-amz-grant-write-acp"),
+        object_lock_enabled_for_bucket: req.get_header("x-amz-bucket-object-lock-enabled").map_or(
+            None,
+            |v| {
+                if v == "true" {
+                    Some(true)
+                } else if v == "false" {
+                    Some(false)
+                } else {
+                    None
+                }
             },
-            |_| {},
-        );
+        ),
+        object_ownership: req
+            .get_header("x-amz-object-ownership")
+            .map_or(None, |v| v.parse().map_or(None, |f| Some(f))),
+    };
+    let url_path = req.url_path();
+    let _ = handler
+        .handle(&opt, url_path.trim_matches('/'))
+        .map_err(|e| {
+            resp.set_status(500);
+            log::info!("delete object handler error: {e}")
+        });
 }
 
-pub struct DeleteBucketOption {}
+pub struct DeleteBucketOption {
+    pub expected_owner: Option<String>,
+}
 pub trait DeleteBucketHandler {
     fn handle(
         &self,
@@ -378,7 +634,14 @@ fn handle_delete_bucket<T: VRequest, F: VResponse, E: DeleteBucketHandler>(
     resp: &mut F,
     handler: &E,
 ) {
-    let opt = DeleteBucketOption {};
+    if req.method()!="DELETE"{
+        resp.set_status(405);
+        resp.send_header();
+        return;
+    }
+    let opt = DeleteBucketOption {
+        expected_owner: req.get_header("x-amz-expected-bucket-owner"),
+    };
     let url_path = req.url_path();
     handler
         .handle(&opt, url_path.trim_matches('/'))
@@ -392,7 +655,7 @@ fn handle_delete_bucket<T: VRequest, F: VResponse, E: DeleteBucketHandler>(
 }
 #[cfg(test)]
 mod req_test {
-    use std::{collections::HashMap, str::Bytes};
+    use std::{collections::HashMap, str::Bytes, sync::RwLock};
 
     struct HttpRequest {
         url_path: String,
@@ -591,5 +854,79 @@ mod req_test {
         super::handle_get_list_buckets(&req, &mut resp, &lb);
         String::from_utf8(resp.body)
             .map_or_else(|e| eprintln!("not ascii {e}"), |v| println!("{v}"));
+    }
+
+    impl super::CreateBucketHandler for RwLock<ListBucket> {
+        fn handle(
+            &self,
+            opt: &super::CreateBucketOption,
+            bucket: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            self.write().map_or(
+                Err(Box::new(super::Error("write lock failed".to_string()))),
+                |mut raw| {
+                    for v in raw.0.iter() {
+                        if v == bucket {
+                            return Ok(());
+                        }
+                    }
+                    raw.0.push(bucket.to_string());
+                    Ok(())
+                },
+            )
+        }
+    }
+    impl super::DeleteBucketHandler for RwLock<ListBucket> {
+        fn handle(
+            &self,
+            opt: &super::DeleteBucketOption,
+            bucket: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            self.write().map_or(
+                Err(Box::new(super::Error("write lock failed".to_string()))),
+                |mut v| {
+                    let mut index = 0;
+                    let mut remove_index = -1;
+                    for vv in v.0.iter() {
+                        if vv == bucket {
+                            remove_index = index as i32;
+                            break;
+                        }
+                        index = index + 1;
+                    }
+                    if remove_index >= 0 {
+                        v.0.remove(remove_index as usize);
+                    }
+                    Ok(())
+                },
+            )
+        }
+    }
+    #[test]
+    fn create_bucket() {
+        let mut hm = HashMap::default();
+        let mut req = HttpRequest {
+            url_path: "/t10".to_string(),
+            query: vec![],
+            method: "PUT".to_string(),
+            headers: hm,
+        };
+        let mut resp = HttpResponse {
+            status: 0,
+            headers: HashMap::default(),
+            body: vec![],
+        };
+        let lb = ListBucket(vec![]);
+        let lb = RwLock::new(lb);
+        super::handle_create_bucket(&req, &mut resp, &lb);
+        assert!(
+            lb.read().expect("read lock error").0.len() == 1,
+            "create bucket failed {}",
+            resp.status
+        );
+        req.method="DELETE".to_string();
+        resp=HttpResponse{ status: 0, headers: HashMap::default(), body: vec![] };
+        super::handle_delete_bucket(&req,&mut resp, &lb);
+        assert!(lb.read().unwrap().0.len()==0,"delete failed {}",resp.status);
     }
 }
