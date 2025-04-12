@@ -185,6 +185,11 @@ pub fn handle_get_list_object<T: VRequest, F: VResponse, E: ListObjectHandler>(
     resp: &mut F,
     handler: &E,
 ) {
+    if req.method()!="GET"{
+        resp.set_status(405);
+        resp.send_header();
+        return;
+    }
     let rpath = req.url_path();
     let bucket = rpath.trim_matches('/').to_string();
     let opt = ListObjectOption {
@@ -258,6 +263,11 @@ pub fn handle_get_list_buckets<T: VRequest, F: VResponse, E: ListBucketHandler>(
     resp: &mut F,
     handler: &E,
 ) {
+    if req.method()!="GET"{
+        resp.set_status(405);
+        resp.send_header();
+        return;
+    }
     let opt = ListBucketsOption {
         bucket_region: req.get_query("bucket-region"),
         continuation_token: req.get_query("continuation-token"),
