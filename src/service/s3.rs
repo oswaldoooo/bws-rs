@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fmt::{Debug, Display},
     io::Write,
     str::FromStr,
@@ -34,12 +35,96 @@ pub trait VResponse: crate::authorization::v4::VHeader {
     fn get_body_writer(&mut self) -> Result<Self::BodyWriter<'_>, Box<dyn std::error::Error>>;
 }
 
-pub trait GetObjectHandler {
+#[derive(Default, Debug, Serialize)]
+pub struct HeadObjectResult {
+    #[serde(rename = "AcceptRanges")]
+    pub accept_ranges: Option<String>,
+    #[serde(rename = "ArchiveStatus")]
+    pub archive_status: Option<String>, // 可用枚举替代
+    #[serde(rename = "BucketKeyEnabled")]
+    pub bucket_key_enabled: Option<bool>,
+    #[serde(rename = "CacheControl")]
+    pub cache_control: Option<String>,
+    #[serde(rename = "ChecksumCRC32")]
+    pub checksum_crc32: Option<String>,
+    #[serde(rename = "ChecksumCRC32C")]
+    pub checksum_crc32c: Option<String>,
+    #[serde(rename = "ChecksumCRC64")]
+    pub checksum_crc64: Option<String>,
+    #[serde(rename = "ChecksumSHA1")]
+    pub checksum_sha1: Option<String>,
+    #[serde(rename = "ChecksumSHA256")]
+    pub checksum_sha256: Option<String>,
+    #[serde(rename = "ChecksumType")]
+    pub checksum_type: Option<String>,
+    #[serde(rename = "ContentDisposition")]
+    pub content_disposition: Option<String>,
+    #[serde(rename = "ContentEncoding")]
+    pub content_encoding: Option<String>,
+    #[serde(rename = "ContentLanguage")]
+    pub content_language: Option<String>,
+    #[serde(rename = "ContentLength")]
+    pub content_length: Option<usize>,
+    #[serde(rename = "ContentRange")]
+    pub content_range: Option<String>,
+    #[serde(rename = "ContentType")]
+    pub content_type: Option<String>,
+    #[serde(rename = "DeleteMarker")]
+    pub delete_marker: Option<bool>,
+    #[serde(rename = "ETag")]
+    pub etag: Option<String>,
+    #[serde(rename = "Expiration")]
+    pub expiration: Option<String>,
+    #[serde(rename = "Expires")]
+    pub expires: Option<String>, // 原是 `time.Time`，可转换为 ISO8601 字符串
+    #[serde(rename = "ExpiresString")]
+    pub expires_string: Option<String>,
+    #[serde(rename = "LastModified")]
+    pub last_modified: Option<String>, // 可考虑使用 chrono::DateTime 类型
+    #[serde(rename = "Metadata")]
+    pub metadata: Option<HashMap<String, String>>,
+    #[serde(rename = "MissingMeta")]
+    pub missing_meta: Option<i32>,
+    #[serde(rename = "ObjectLockLegalHoldStatus")]
+    pub object_lock_legal_hold_status: Option<String>,
+    #[serde(rename = "ObjectLockMode")]
+    pub object_lock_mode: Option<String>,
+    #[serde(rename = "ObjectLockRetainUntilDate")]
+    pub object_lock_retain_until_date: Option<String>,
+    #[serde(rename = "PartsCount")]
+    pub parts_count: Option<i32>,
+    #[serde(rename = "ReplicationStatus")]
+    pub replication_status: Option<String>,
+    #[serde(rename = "RequestCharged")]
+    pub request_charged: Option<String>,
+    #[serde(rename = "Restore")]
+    pub restore: Option<String>,
+    #[serde(rename = "SSECustomerAlgorithm")]
+    pub sse_customer_algorithm: Option<String>,
+    #[serde(rename = "SSECustomerKeyMD5")]
+    pub sse_customer_key_md5: Option<String>,
+    #[serde(rename = "SSEKMSKeyId")]
+    pub sse_kms_key_id: Option<String>,
+    #[serde(rename = "ServerSideEncryption")]
+    pub server_side_encryption: Option<String>,
+    #[serde(rename = "StorageClass")]
+    pub storage_class: Option<String>,
+    #[serde(rename = "VersionId")]
+    pub version_id: Option<String>,
+    #[serde(rename = "WebsiteRedirectLocation")]
+    pub website_redirect_location: Option<String>,
+}
+
+pub trait LookupHandler {
+    fn lookup(&self, bucket: &str, object: &str) -> Result<Option<HeadObjectResult>, Error>;
+}
+
+pub trait GetObjectHandler: LookupHandler {
     fn handle(
         &self,
-        rpath: &str,
-        set_meta: impl FnMut(usize, &str, &str, chrono::DateTime<chrono::Utc>), /*content-length,content-type,etag,last-modified */
-        out: impl FnMut(&[u8]) -> Result<usize, Box<dyn std::error::Error>>,
+        bucket: &str,
+        object: &str,
+        out: impl FnMut(&[u8]) -> Result<(), Box<dyn std::error::Error>>,
     ) -> Result<(), Box<dyn std::error::Error>>;
 }
 extern crate serde;
@@ -157,42 +242,68 @@ pub trait ListObjectHandler {
         bucket: &str,
     ) -> Result<Vec<ListObjectContent>, Box<dyn std::error::Error>>;
 }
-
+pub fn handle_head_object<T: VRequest, F: VResponse, E: LookupHandler>(
+    req: &T,
+    resp: &mut F,
+    handler: &E,
+) {
+    todo!()
+}
 pub fn handle_get_object<T: VRequest, F: VResponse, E: GetObjectHandler>(
     req: &T,
     resp: &mut F,
     handler: &E,
 ) {
+    if req.method() != "GET" {
+        resp.set_status(405);
+        resp.send_header();
+        return;
+    }
     let rpath = req.url_path();
-    let resp2 = Mutex::new(resp);
-    let ret = handler.handle(
-        &rpath,
-        |size, ct, etag, last_modified| {
-            resp2
-                .lock()
-                .expect("lock failed")
-                .set_header("content-type", ct);
-            resp2
-                .lock()
-                .expect("lock failed")
-                .set_header("content-length", size.to_string().as_str());
-            resp2.lock().expect("lock failed").set_header("etag", etag);
-            resp2
-                .lock()
-                .expect("lock failed")
-                .set_header("last-modified", last_modified.to_rfc2822().as_str());
-        },
-        |d| {
-            let mut writer = resp2.lock().expect("lock failed");
-            let mut w = writer.get_body_writer()?;
-            w.write_all(d)?;
-            Ok(d.len())
-        },
-    );
+    let raw = rpath.trim_matches('/');
+    let r = raw.find('/');
+    if r.is_none() {
+        resp.set_status(400);
+        resp.send_header();
+        return;
+    }
+    let next = r.unwrap();
+    let bucket = &raw[..next];
+    let object = &raw[next + 1..];
+
+    let head = handler.lookup(bucket, object);
+    if let Err(e) = head {
+        log::error!("lookup {bucket} {object} error: {e}");
+        resp.set_status(500);
+        resp.send_header();
+        return;
+    }
+    let head = head.unwrap();
+    if let None = head {
+        log::info!("not found {bucket} {object}");
+        resp.set_status(404);
+        resp.send_header();
+        return;
+    }
+    //send header info to client
+    let head = head.unwrap();
+    head.content_length
+        .map(|v| resp.set_header("content-length", v.to_string().as_str()));
+    head.etag.map(|v| resp.set_header("etag", &v));
+    head.content_type
+        .map(|v| resp.set_header("content-type", &v));
+    head.last_modified
+        .map(|v| resp.set_header("last-modified", &v));
+    //
+    resp.set_status(200);
+    resp.send_header();
+    let ret = handler.handle(bucket, object, |d| {
+        let mut w = resp.get_body_writer()?;
+        w.write_all(d)?;
+        Ok(())
+    });
     if let Err(err) = ret {
-        log::info!("get_object handle return error: {err}");
-        resp2.lock().expect("lock failed").set_status(400);
-        resp2.lock().expect("lock failed").send_header();
+        log::error!("get_object handle return error: {err}");
         return;
     }
 }
@@ -634,7 +745,7 @@ fn handle_delete_bucket<T: VRequest, F: VResponse, E: DeleteBucketHandler>(
     resp: &mut F,
     handler: &E,
 ) {
-    if req.method()!="DELETE"{
+    if req.method() != "DELETE" {
         resp.set_status(405);
         resp.send_header();
         return;
@@ -656,7 +767,7 @@ fn handle_delete_bucket<T: VRequest, F: VResponse, E: DeleteBucketHandler>(
 #[cfg(test)]
 mod req_test {
     use std::{collections::HashMap, str::Bytes, sync::RwLock};
-
+    static FakeEtag: &'static str = "ffffffffffffffff";
     struct HttpRequest {
         url_path: String,
         query: Vec<(String, String)>,
@@ -704,6 +815,7 @@ mod req_test {
             self.query.iter().all(|(k, v)| cb(k, v));
         }
     }
+    #[derive(Default)]
     struct HttpResponse {
         status: i32,
         headers: HashMap<String, String>,
@@ -741,7 +853,7 @@ mod req_test {
     }
     impl super::VResponse for HttpResponse {
         fn set_status(&mut self, status: i32) {
-            if status != 0 {
+            if self.status != 0 {
                 return;
             }
             self.status = status;
@@ -924,9 +1036,88 @@ mod req_test {
             "create bucket failed {}",
             resp.status
         );
-        req.method="DELETE".to_string();
-        resp=HttpResponse{ status: 0, headers: HashMap::default(), body: vec![] };
-        super::handle_delete_bucket(&req,&mut resp, &lb);
-        assert!(lb.read().unwrap().0.len()==0,"delete failed {}",resp.status);
+        req.method = "DELETE".to_string();
+        resp = HttpResponse {
+            status: 0,
+            headers: HashMap::default(),
+            body: vec![],
+        };
+        super::handle_delete_bucket(&req, &mut resp, &lb);
+        assert!(
+            lb.read().unwrap().0.len() == 0,
+            "delete failed {}",
+            resp.status
+        );
+    }
+    impl super::LookupHandler for HashMap<String, String> {
+        fn lookup(
+            &self,
+            bucket: &str,
+            object: &str,
+        ) -> Result<Option<super::HeadObjectResult>, super::Error> {
+            let ret = self.get(object);
+            if let None = ret {
+                return Ok(None);
+            }
+            let info = ret.unwrap();
+            Ok(Some(super::HeadObjectResult {
+                content_length: Some(info.len()),
+                content_type: Some("text/plain".to_string()),
+                etag: Some(FakeEtag.to_string()),
+                last_modified: Some(chrono::Utc::now().to_rfc2822().to_string()),
+                ..Default::default()
+            }))
+        }
+    }
+    impl super::GetObjectHandler for HashMap<String, String> {
+        fn handle(
+            &self,
+            bucket: &str,
+            object: &str,
+            mut out: impl FnMut(&[u8]) -> Result<(), Box<dyn std::error::Error>>,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let ret = self.get(object);
+            if let None = ret {
+                return Err(Box::new(super::Error("content not found".to_string())));
+            }
+            let info = ret.unwrap();
+            out(info.as_bytes())
+        }
+    }
+
+    #[test]
+    fn get_object() {
+        let hm = HashMap::default();
+        let req = HttpRequest {
+            url_path: "/test/test.txt".to_string(),
+            query: vec![],
+            method: "GET".to_string(),
+            headers: hm,
+        };
+        let mut resp = HttpResponse::default();
+        let mut objstore = HashMap::default();
+        objstore.insert("test.txt".to_string(), "im test!".to_string());
+        super::handle_get_object(&req, &mut resp, &objstore);
+        assert!(
+            resp.status == 200,
+            "response status is not 200 {}",
+            resp.status
+        );
+        let val = String::from_utf8(resp.body).map_or("NoAscii".to_string(), |v| v);
+        assert!(
+            val == "im test!",
+            "response content is not 'im test!' got {}",
+            val
+        );
+
+        let mut resp = HttpResponse::default();
+        let mut objstore = HashMap::default();
+        objstore.insert("hello.txt".to_string(), "im test!".to_string());
+        super::handle_get_object(&req, &mut resp, &objstore);
+        assert!(
+            resp.status == 404,
+            "response status is not 404 {}",
+            resp.status
+        );
     }
 }
