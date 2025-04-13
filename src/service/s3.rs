@@ -6,8 +6,19 @@ use std::{
     sync::Mutex,
 };
 static OwnerId: &'static str = "ffffffffffffffff";
-
+pub type DateTime = chrono::DateTime<chrono::Utc>;
 pub struct Error(String);
+impl From<String> for Error {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for Error {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -25,14 +36,21 @@ pub trait VRequest: crate::authorization::v4::VHeader {
     fn get_query(&self, k: &str) -> Option<String>;
     fn all_query(&self, cb: impl FnMut(&str, &str) -> bool);
 }
-
-pub trait VResponse: crate::authorization::v4::VHeader {
+pub trait BodyWriter {
     type BodyWriter<'a>: std::io::Write
     where
         Self: 'a;
+    fn get_body_writer(&mut self) -> Result<Self::BodyWriter<'_>, Box<dyn std::error::Error>>;
+}
+pub trait BodyReader {
+    type BodyReader<'a>: std::io::Read
+    where
+        Self: 'a;
+    fn get_body_reader(&mut self) -> Result<Self::BodyReader<'_>, Box<dyn std::error::Error>>;
+}
+pub trait VResponse: crate::authorization::v4::VHeader + BodyWriter {
     fn set_status(&mut self, status: i32);
     fn send_header(&mut self);
-    fn get_body_writer(&mut self) -> Result<Self::BodyWriter<'_>, Box<dyn std::error::Error>>;
 }
 
 #[derive(Default, Debug, Serialize)]
@@ -430,16 +448,228 @@ pub fn handle_get_list_buckets<T: VRequest, F: VResponse, E: ListBucketHandler>(
         },
     );
 }
-pub struct PutObjectOption {}
+#[derive(Default)]
+pub struct PutObjectOption {
+    // pub acl: ObjectCannedACL,
+    pub cache_control: Option<String>,
+    pub checksum_algorithm: Option<ChecksumAlgorithm>,
+    pub checksum_crc32: Option<String>,
+    pub checksum_crc32c: Option<String>,
+    pub checksum_crc64nvme: Option<String>,
+    pub checksum_sha1: Option<String>,
+    pub checksum_sha256: Option<String>,
+    pub content_disposition: Option<String>,
+    pub content_encoding: Option<String>,
+    pub content_language: Option<String>,
+    pub content_length: Option<i64>,
+    pub content_md5: Option<String>,
+    pub content_type: Option<String>,
+    pub expected_bucket_owner: Option<String>,
+    pub expires: Option<DateTime>,
+    pub grant_full_control: Option<String>,
+    pub grant_read: Option<String>,
+    pub if_match: Option<String>,
+    pub if_none_match: Option<String>,
+    // pub metadata: Option<HashMap<String, String>>,
+    pub object_lock_legal_hold_status: Option<ObjectLockLegalHoldStatus>,
+    pub object_lock_mode: Option<ObjectLockMode>,
+    pub object_lock_retain_until_date: Option<DateTime>,
+    pub request_payer: Option<RequestPayer>,
+    pub storage_class: Option<String>,
+    // pub tagging: Option<String>,
+    // pub website_redirect_location: Option<String>,
+    pub write_offset_bytes: Option<i64>,
+}
+impl PutObjectOption {
+    pub fn invalid(&self) -> bool {
+        if self.content_length.is_none() {
+            return false;
+        } else if self.content_md5.is_none() {
+            return false;
+        }
+        true
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ChecksumAlgorithm {
+    Crc32,
+    Crc32c,
+    Sha1,
+    Sha256,
+    Crc64nvme,
+}
+
+impl std::str::FromStr for ChecksumAlgorithm {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "CRC32" => Ok(ChecksumAlgorithm::Crc32),
+            "CRC32C" => Ok(ChecksumAlgorithm::Crc32c),
+            "SHA1" => Ok(ChecksumAlgorithm::Sha1),
+            "SHA256" => Ok(ChecksumAlgorithm::Sha256),
+            "CRC64NVME" => Ok(ChecksumAlgorithm::Crc64nvme),
+            _ => Err(format!("Invalid checksum algorithm: {}", s)),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum RequestPayer {
+    Requester,
+}
+impl std::str::FromStr for RequestPayer {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "requester" => Ok(RequestPayer::Requester),
+            _ => Err(Error(format!("Invalid RequestPayer value: {}", s))),
+        }
+    }
+}
+#[derive(Debug)]
+pub enum ObjectLockMode {
+    Governance,
+    Compliance,
+}
+impl std::str::FromStr for ObjectLockMode {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "GOVERNANCE" => Ok(ObjectLockMode::Governance),
+            "COMPLIANCE" => Ok(ObjectLockMode::Compliance),
+            _ => Err(Error(format!("Invalid ObjectLockMode value: {}", s))),
+        }
+    }
+}
+#[derive(Debug)]
+pub enum ObjectLockLegalHoldStatus {
+    On,
+    Off,
+}
+impl std::str::FromStr for ObjectLockLegalHoldStatus {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ON" => Ok(ObjectLockLegalHoldStatus::On),
+            "OFF" => Ok(ObjectLockLegalHoldStatus::Off),
+            _ => Err(Error(format!(
+                "Invalid ObjectLockLegalHoldStatus value: {}",
+                s
+            ))),
+        }
+    }
+}
+
 pub trait PutObjectHandler {
     fn handle(
         &self,
         opt: &PutObjectOption,
+        bucket: &str,
         object: &str,
         body: &mut dyn std::io::Read,
     ) -> Result<(), Box<dyn std::error::Error>>;
 }
-
+pub fn handle_put_object<T: VRequest + BodyReader, F: VResponse, E: PutObjectHandler>(
+    mut req: &mut T,
+    resp: &mut F,
+    handler: &E,
+) {
+    if req.method() != "PUT" {
+        resp.set_status(405);
+        resp.send_header();
+        return;
+    }
+    let url_path = req.url_path();
+    let url_path = url_path.trim_matches('/');
+    let ret = url_path.find('/');
+    if let None = ret {
+        resp.set_status(400);
+        resp.send_header();
+        return;
+    }
+    let next = ret.unwrap();
+    let bucket = &url_path[..next];
+    let object = &url_path[next + 1..];
+    let opt = PutObjectOption {
+        cache_control: req.get_header("cache-control"),
+        checksum_algorithm: req.get_header("checksum-algorithm").map_or(None, |v| {
+            ChecksumAlgorithm::from_str(&v).map_or(None, |v| Some(v))
+        }),
+        checksum_crc32: req.get_header("x-amz-checksum-crc32"),
+        checksum_crc32c: req.get_header("x-amz-checksum-crc32c"),
+        checksum_crc64nvme: req.get_header("x-amz-checksum-crc64vme"),
+        checksum_sha1: req.get_header("x-amz-checksum-sha1"),
+        checksum_sha256: req.get_header("x-amz-checksum-sha256"),
+        content_disposition: req.get_header("content-disposition"),
+        content_encoding: req.get_header("cotent-encoding"),
+        content_language: req.get_header("content-language"),
+        content_length: req.get_header("content-length").map_or(None, |v| {
+            i64::from_str_radix(&v, 10).map_or(Some(-1), |v| Some(v))
+        }),
+        content_md5: req.get_header("content-md5"),
+        content_type: req.get_header("content-type"),
+        expected_bucket_owner: req.get_header("x-amz-expected-bucket-owner"),
+        expires: req.get_header("expire").map_or(None, |v| {
+            chrono::NaiveDateTime::parse_from_str(&v, "%a, %d %b %Y %H:%M:%S GMT")
+                .map_or(None, |v| {
+                    Some(chrono::DateTime::from_naive_utc_and_offset(v, chrono::Utc))
+                })
+        }),
+        grant_full_control: req.get_header("x-amz-grant-full-control"),
+        grant_read: req.get_header("x-amz-grant-read"),
+        if_match: req.get_header("if-match"),
+        if_none_match: req.get_header("if-none-match"),
+        // metadata: todo!(),
+        object_lock_legal_hold_status: req
+            .get_header("x-amz-object-lock-legal-hold-status")
+            .map_or(None, |v| {
+                ObjectLockLegalHoldStatus::from_str(&v).map_or(None, |v| Some(v))
+            }),
+        object_lock_mode: req.get_header("x-amz-object-lock-mode").map_or(None, |v| {
+            ObjectLockMode::from_str(&v).map_or(None, |v| Some(v))
+        }),
+        object_lock_retain_until_date: req
+            .get_header("x-amz-object-lock-retain_until_date")
+            .map_or(None, |v| {
+                chrono::NaiveDateTime::parse_from_str(&v, "%a, %d %b %Y %H:%M:%S GMT")
+                    .map_or(None, |v| {
+                        Some(chrono::DateTime::from_naive_utc_and_offset(v, chrono::Utc))
+                    })
+            }),
+        request_payer: req.get_header("x-amz-request-payer").map_or(None, |v| {
+            RequestPayer::from_str(&v).map_or(None, |v| Some(v))
+        }),
+        storage_class: req.get_header("x-amz-storage-class"),
+        // tagging: todo!(),
+        // website_redirect_location: todo!(),
+        write_offset_bytes: req
+            .get_header("x-amz-write-offset-bytes")
+            .map_or(None, |v| {
+                i64::from_str_radix(&v, 10).map_or(None, |v| Some(v))
+            }),
+    };
+    let ret = req.get_body_reader();
+    if let Err(err) = ret {
+        resp.set_status(500);
+        resp.send_header();
+        log::error!("get body reader error: {err}");
+        return;
+    }
+    let mut r = ret.unwrap();
+    match handler.handle(&opt, bucket, object, &mut r) {
+        Ok(_) => {
+            resp.set_status(200);
+            resp.send_header();
+        }
+        Err(err) => {
+            resp.set_status(500);
+            resp.send_header();
+            log::error!("put object handle error: {err}");
+        }
+    }
+}
 pub struct DeleteObjectOption {}
 pub trait DeleteObjectHandler {
     fn handle(
@@ -851,6 +1081,13 @@ mod req_test {
             Ok(())
         }
     }
+    impl super::BodyWriter for HttpResponse {
+        type BodyWriter<'a> = VecWriter<'a>;
+
+        fn get_body_writer(&mut self) -> Result<Self::BodyWriter<'_>, Box<dyn std::error::Error>> {
+            Ok(VecWriter(&mut self.body))
+        }
+    }
     impl super::VResponse for HttpResponse {
         fn set_status(&mut self, status: i32) {
             if self.status != 0 {
@@ -860,12 +1097,6 @@ mod req_test {
         }
 
         fn send_header(&mut self) {}
-
-        type BodyWriter<'a> = VecWriter<'a>;
-
-        fn get_body_writer(&mut self) -> Result<Self::BodyWriter<'_>, Box<dyn std::error::Error>> {
-            Ok(VecWriter(&mut self.body))
-        }
     }
 
     pub struct ListBucket(Vec<String>);
@@ -1120,4 +1351,6 @@ mod req_test {
             resp.status
         );
     }
+    #[test]
+    fn put_and_delete_object() {}
 }
