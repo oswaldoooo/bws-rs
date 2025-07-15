@@ -5,7 +5,7 @@ use std::{
     str::FromStr,
     sync::Mutex,
 };
-static OwnerId: &'static str = "ffffffffffffffff";
+static OWNER_ID: &str = "ffffffffffffffff";
 pub type DateTime = chrono::DateTime<chrono::Utc>;
 pub struct Error(String);
 impl From<String> for Error {
@@ -297,7 +297,7 @@ pub fn handle_get_object<T: VRequest, F: VResponse, E: GetObjectHandler>(
         return;
     }
     let head = head.unwrap();
-    if let None = head {
+    if head.is_none() {
         log::info!("not found {bucket} {object}");
         resp.set_status(404);
         resp.send_header();
@@ -305,13 +305,18 @@ pub fn handle_get_object<T: VRequest, F: VResponse, E: GetObjectHandler>(
     }
     //send header info to client
     let head = head.unwrap();
-    head.content_length
-        .map(|v| resp.set_header("content-length", v.to_string().as_str()));
-    head.etag.map(|v| resp.set_header("etag", &v));
-    head.content_type
-        .map(|v| resp.set_header("content-type", &v));
-    head.last_modified
-        .map(|v| resp.set_header("last-modified", &v));
+    if let Some(v) = head.content_length {
+        resp.set_header("content-length", v.to_string().as_str())
+    }
+    if let Some(v) = head.etag {
+        resp.set_header("etag", &v)
+    }
+    if let Some(v) = head.content_type {
+        resp.set_header("content-type", &v)
+    }
+    if let Some(v) = head.last_modified {
+        resp.set_header("last-modified", &v)
+    }
     //
     resp.set_status(200);
     resp.send_header();
@@ -322,7 +327,6 @@ pub fn handle_get_object<T: VRequest, F: VResponse, E: GetObjectHandler>(
     });
     if let Err(err) = ret {
         log::error!("get_object handle return error: {err}");
-        return;
     }
 }
 
@@ -344,14 +348,14 @@ pub fn handle_get_list_object<T: VRequest, F: VResponse, E: ListObjectHandler>(
         continuation_token: req.get_query("continuation-token"),
         delimiter: req.get_query("delimiter"),
         expected_bucket_owner: req.get_query("expected-bucket-owner"),
-        max_keys: req.get_query("max-keys").map_or(None, |v| {
-            i32::from_str_radix(&v, 10).map_or(None, |v| Some(v))
-        }),
+        max_keys: req
+            .get_query("max-keys")
+            .and_then(|v| v.parse::<i32>().ok()),
         optional_object_attributes: None, //todo: support option_object_attributes on v2
         request_payer: req.get_header("x-amz-request-layer"),
         start_after: req.get_query("start-after"),
         encoding_type: req.get_query("encoding-type"),
-        fetch_owner: req.get_query("fetch-owner").map_or(None, |v| {
+        fetch_owner: req.get_query("fetch-owner").and_then(|v| {
             if v == "true" {
                 Some(true)
             } else if v == "false" {
@@ -368,7 +372,7 @@ pub fn handle_get_list_object<T: VRequest, F: VResponse, E: ListObjectHandler>(
             name: bucket,
             prefix: opt.prefix,
             key_count: Some(ans.len() as u32),
-            max_keys: opt.max_keys.map_or(None, |v| Some(v as u32)),
+            max_keys: opt.max_keys.map(|v| v as u32),
             delimiter: opt.delimiter,
             is_truncated: false,
             contents: ans,
@@ -418,9 +422,9 @@ pub fn handle_get_list_buckets<T: VRequest, F: VResponse, E: ListBucketHandler>(
     let opt = ListBucketsOption {
         bucket_region: req.get_query("bucket-region"),
         continuation_token: req.get_query("continuation-token"),
-        max_buckets: req.get_query("max-buckets").map_or(None, |v| {
-            i32::from_str_radix(&v, 10).map_or(None, |v| Some(v))
-        }),
+        max_buckets: req
+            .get_query("max-buckets")
+            .and_then(|v| v.parse::<i32>().ok()),
         prefix: req.get_query("prefix"),
     };
     handler.handle(&opt).map_or_else(
@@ -429,7 +433,7 @@ pub fn handle_get_list_buckets<T: VRequest, F: VResponse, E: ListBucketHandler>(
             let res = ListAllMyBucketsResult {
                 xmlns: r#"xmlns="http://s3.amazonaws.com/doc/2006-03-01/""#.to_string(),
                 owner: Owner {
-                    id: OwnerId.to_string(),
+                    id: OWNER_ID.to_string(),
                     display_name: "bws".to_string(),
                 },
                 buckets: Buckets { bucket: v },
@@ -572,7 +576,7 @@ pub trait PutObjectHandler {
     ) -> Result<(), Box<dyn std::error::Error>>;
 }
 pub fn handle_put_object<T: VRequest + BodyReader, F: VResponse, E: PutObjectHandler>(
-    mut req: &mut T,
+    req: &mut T,
     resp: &mut F,
     handler: &E,
 ) {
@@ -584,7 +588,7 @@ pub fn handle_put_object<T: VRequest + BodyReader, F: VResponse, E: PutObjectHan
     let url_path = req.url_path();
     let url_path = url_path.trim_matches('/');
     let ret = url_path.find('/');
-    if let None = ret {
+    if ret.is_none() {
         resp.set_status(400);
         resp.send_header();
         return;
@@ -594,9 +598,9 @@ pub fn handle_put_object<T: VRequest + BodyReader, F: VResponse, E: PutObjectHan
     let object = &url_path[next + 1..];
     let opt = PutObjectOption {
         cache_control: req.get_header("cache-control"),
-        checksum_algorithm: req.get_header("checksum-algorithm").map_or(None, |v| {
-            ChecksumAlgorithm::from_str(&v).map_or(None, |v| Some(v))
-        }),
+        checksum_algorithm: req
+            .get_header("checksum-algorithm")
+            .and_then(|v| ChecksumAlgorithm::from_str(&v).ok()),
         checksum_crc32: req.get_header("x-amz-checksum-crc32"),
         checksum_crc32c: req.get_header("x-amz-checksum-crc32c"),
         checksum_crc64nvme: req.get_header("x-amz-checksum-crc64vme"),
@@ -605,13 +609,13 @@ pub fn handle_put_object<T: VRequest + BodyReader, F: VResponse, E: PutObjectHan
         content_disposition: req.get_header("content-disposition"),
         content_encoding: req.get_header("cotent-encoding"),
         content_language: req.get_header("content-language"),
-        content_length: req.get_header("content-length").map_or(None, |v| {
-            i64::from_str_radix(&v, 10).map_or(Some(-1), |v| Some(v))
-        }),
+        content_length: req
+            .get_header("content-length")
+            .and_then(|v| v.parse::<i64>().map_or(Some(-1), Some)),
         content_md5: req.get_header("content-md5"),
         content_type: req.get_header("content-type"),
         expected_bucket_owner: req.get_header("x-amz-expected-bucket-owner"),
-        expires: req.get_header("expire").map_or(None, |v| {
+        expires: req.get_header("expire").and_then(|v| {
             chrono::NaiveDateTime::parse_from_str(&v, "%a, %d %b %Y %H:%M:%S GMT")
                 .map_or(None, |v| {
                     Some(chrono::DateTime::from_naive_utc_and_offset(v, chrono::Utc))
@@ -624,31 +628,27 @@ pub fn handle_put_object<T: VRequest + BodyReader, F: VResponse, E: PutObjectHan
         // metadata: todo!(),
         object_lock_legal_hold_status: req
             .get_header("x-amz-object-lock-legal-hold-status")
-            .map_or(None, |v| {
-                ObjectLockLegalHoldStatus::from_str(&v).map_or(None, |v| Some(v))
-            }),
-        object_lock_mode: req.get_header("x-amz-object-lock-mode").map_or(None, |v| {
-            ObjectLockMode::from_str(&v).map_or(None, |v| Some(v))
-        }),
+            .and_then(|v| ObjectLockLegalHoldStatus::from_str(&v).ok()),
+        object_lock_mode: req
+            .get_header("x-amz-object-lock-mode")
+            .and_then(|v| ObjectLockMode::from_str(&v).ok()),
         object_lock_retain_until_date: req
             .get_header("x-amz-object-lock-retain_until_date")
-            .map_or(None, |v| {
+            .and_then(|v| {
                 chrono::NaiveDateTime::parse_from_str(&v, "%a, %d %b %Y %H:%M:%S GMT")
                     .map_or(None, |v| {
                         Some(chrono::DateTime::from_naive_utc_and_offset(v, chrono::Utc))
                     })
             }),
-        request_payer: req.get_header("x-amz-request-payer").map_or(None, |v| {
-            RequestPayer::from_str(&v).map_or(None, |v| Some(v))
-        }),
+        request_payer: req
+            .get_header("x-amz-request-payer")
+            .and_then(|v| RequestPayer::from_str(&v).ok()),
         storage_class: req.get_header("x-amz-storage-class"),
         // tagging: todo!(),
         // website_redirect_location: todo!(),
         write_offset_bytes: req
             .get_header("x-amz-write-offset-bytes")
-            .map_or(None, |v| {
-                i64::from_str_radix(&v, 10).map_or(None, |v| Some(v))
-            }),
+            .and_then(|v| v.parse::<i64>().ok()),
     };
     let ret = req.get_body_reader();
     if let Err(err) = ret {
@@ -748,14 +748,16 @@ impl From<&str> for DataRedundancy {
         }
     }
 }
-
-impl ToString for DataRedundancy {
-    fn to_string(&self) -> String {
-        match self {
-            Self::SingleAvailabilityZone => "SingleAvailabilityZone".to_string(),
-            Self::SingleLocalZone => "SingleLocalZone".to_string(),
-            Self::Unknown(s) => s.clone(),
-        }
+impl Display for DataRedundancy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            match self {
+                DataRedundancy::SingleAvailabilityZone => "SingleAvailabilityZone".to_string(),
+                DataRedundancy::SingleLocalZone => "SingleLocalZone".to_string(),
+                DataRedundancy::Unknown(s) => s.clone(),
+            }
+            .as_str(),
+        )
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -773,12 +775,15 @@ impl From<&str> for BucketType {
     }
 }
 
-impl ToString for BucketType {
-    fn to_string(&self) -> String {
-        match self {
-            Self::Directory => "Directory".to_string(),
-            Self::Unknown(s) => s.clone(),
-        }
+impl Display for BucketType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            match self {
+                Self::Directory => "Directory".to_string(),
+                Self::Unknown(s) => s.clone(),
+            }
+            .as_str(),
+        )
     }
 }
 
@@ -869,9 +874,9 @@ impl From<&str> for BucketLocationConstraint {
     }
 }
 
-impl ToString for BucketLocationConstraint {
-    fn to_string(&self) -> String {
-        match self {
+impl Display for BucketLocationConstraint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
             Self::AfSouth1 => "af-south-1",
             Self::ApEast1 => "ap-east-1",
             Self::ApNortheast1 => "ap-northeast-1",
@@ -906,8 +911,7 @@ impl ToString for BucketLocationConstraint {
             Self::UsWest1 => "us-west-1",
             Self::UsWest2 => "us-west-2",
             Self::Unknown(s) => s,
-        }
-        .to_string()
+        })
     }
 }
 
@@ -934,9 +938,9 @@ fn handle_create_bucket<T: VRequest, F: VResponse, E: CreateBucketHandler>(
         grant_read_acp: req.get_header("x-amz-grant-read-acp"),
         grant_write: req.get_header("x-amz-grant-write"),
         grant_write_acp: req.get_header("x-amz-grant-write-acp"),
-        object_lock_enabled_for_bucket: req.get_header("x-amz-bucket-object-lock-enabled").map_or(
-            None,
-            |v| {
+        object_lock_enabled_for_bucket: req
+            .get_header("x-amz-bucket-object-lock-enabled")
+            .and_then(|v| {
                 if v == "true" {
                     Some(true)
                 } else if v == "false" {
@@ -944,11 +948,10 @@ fn handle_create_bucket<T: VRequest, F: VResponse, E: CreateBucketHandler>(
                 } else {
                     None
                 }
-            },
-        ),
+            }),
         object_ownership: req
             .get_header("x-amz-object-ownership")
-            .map_or(None, |v| v.parse().map_or(None, |f| Some(f))),
+            .and_then(|v| v.parse().ok()),
     };
     let url_path = req.url_path();
     let _ = handler
@@ -996,8 +999,8 @@ fn handle_delete_bucket<T: VRequest, F: VResponse, E: DeleteBucketHandler>(
 }
 #[cfg(test)]
 mod req_test {
-    use std::{collections::HashMap, str::Bytes, sync::RwLock};
-    static FakeEtag: &'static str = "ffffffffffffffff";
+    use std::{collections::HashMap, sync::RwLock};
+    static FAKE_ETAG: &str = "ffffffffffffffff";
     struct HttpRequest {
         url_path: String,
         query: Vec<(String, String)>,
@@ -1034,8 +1037,8 @@ mod req_test {
 
         fn get_query(&self, target: &str) -> Option<String> {
             let ans: Vec<_> = self.query.iter().filter(|(k, v)| k == target).collect();
-            if ans.len() > 0 {
-                Some(ans.get(0).unwrap().1.clone())
+            if !ans.is_empty() {
+                Some(ans.first().unwrap().1.clone())
             } else {
                 None
             }
@@ -1140,9 +1143,7 @@ mod req_test {
                 .0
                 .iter()
                 .map(|v| super::Bucket {
-                    name: v
-                        .find('/')
-                        .map_or(v.clone(), |next| (&v[..next]).to_string()),
+                    name: v.find('/').map_or(v.clone(), |next| v[..next].to_string()),
                     creation_date: date.clone(),
                     bucket_region: "us-east-1".to_string(),
                 })
@@ -1158,7 +1159,7 @@ mod req_test {
             "one/jack.json".to_string(),
             "one/jim.json".to_string(),
         ]);
-        let mut hm = HashMap::default();
+        let hm = HashMap::default();
         let req = HttpRequest {
             url_path: "/test".to_string(),
             query: vec![],
@@ -1176,7 +1177,7 @@ mod req_test {
     }
     #[test]
     fn list_buckets() {
-        let mut hm = HashMap::default();
+        let hm = HashMap::default();
         let req = HttpRequest {
             url_path: "/".to_string(),
             query: vec![],
@@ -1232,10 +1233,10 @@ mod req_test {
                     let mut remove_index = -1;
                     for vv in v.0.iter() {
                         if vv == bucket {
-                            remove_index = index as i32;
+                            remove_index = index;
                             break;
                         }
-                        index = index + 1;
+                        index += 1;
                     }
                     if remove_index >= 0 {
                         v.0.remove(remove_index as usize);
@@ -1247,7 +1248,7 @@ mod req_test {
     }
     #[test]
     fn create_bucket() {
-        let mut hm = HashMap::default();
+        let hm = HashMap::default();
         let mut req = HttpRequest {
             url_path: "/t10".to_string(),
             query: vec![],
@@ -1275,7 +1276,7 @@ mod req_test {
         };
         super::handle_delete_bucket(&req, &mut resp, &lb);
         assert!(
-            lb.read().unwrap().0.len() == 0,
+            lb.read().unwrap().0.is_empty(),
             "delete failed {}",
             resp.status
         );
@@ -1294,7 +1295,7 @@ mod req_test {
             Ok(Some(super::HeadObjectResult {
                 content_length: Some(info.len()),
                 content_type: Some("text/plain".to_string()),
-                etag: Some(FakeEtag.to_string()),
+                etag: Some(FAKE_ETAG.to_string()),
                 last_modified: Some(chrono::Utc::now().to_rfc2822().to_string()),
                 ..Default::default()
             }))

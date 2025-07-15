@@ -61,7 +61,7 @@ fn get_v4_signature<T: VHeader>(
     let tosign = format!(
         "AWS4-HMAC-SHA256\n{}\n{}/{region}/{service}/aws4_request\n{canonical_hsh}",
         xamz_date,
-        xamz_date[..8].to_string()
+        &xamz_date[..8]
     );
     // println!("tosign:{tosign}");
     let ret = Hmac::<sha2::Sha256>::new_from_slice(buff);
@@ -107,7 +107,7 @@ fn circle_hmac_sha256(initkey: &str, values: &[&[u8]], target: &mut [u8]) -> Gen
             }
         }
     }
-    (&mut target[0..next.len()]).copy_from_slice(&next);
+    target[0..next.len()].copy_from_slice(&next);
     Ok(())
 }
 
@@ -158,10 +158,7 @@ mod v4test {
     impl VHeader for HashMap<String, String> {
         fn get_header(&self, key: &str) -> Option<String> {
             let ans = self.get(key);
-            match ans {
-                Some(ans) => Some(ans.clone()),
-                None => None,
-            }
+            ans.cloned()
         }
 
         fn set_header(&mut self, key: &str, val: &str) {
@@ -173,7 +170,7 @@ mod v4test {
         }
 
         fn rng_header(&self, mut cb: impl FnMut(&str, &str) -> bool) {
-            self.iter().all(|(k, v)| cb(&k, &v));
+            self.iter().all(|(k, v)| cb(k, v));
         }
     }
     #[test]
