@@ -18,6 +18,10 @@ func TestCreateBucket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, err = creds.BucketExists(context.Background(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	err = creds.MakeBucket(context.Background(), "itest", minio.MakeBucketOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -59,6 +63,7 @@ func TestCreateBucket(t *testing.T) {
 	if string(content) != "hello" {
 		t.Fatal("expect hello got [" + string(content) + "]")
 	}
+
 	// bktinfo := creds.ListObjects(context.Background(), "test", minio.ListObjectsOptions{})
 	// if err != nil {
 	// 	t.Fatal(err)
@@ -68,5 +73,5 @@ func TestCreateBucket(t *testing.T) {
 	// }
 }
 
-func TestS3Sdk(t *testing.T) {
-}
+// func TestS3Sdk(t *testing.T) {
+// }

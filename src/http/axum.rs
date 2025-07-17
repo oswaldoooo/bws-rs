@@ -137,7 +137,6 @@ impl From<Response> for axum::response::Response {
         });
         if !val.headers.is_empty() {
             if let Some(header) = respbuilder.headers_mut() {
-                log::info!("herit {:?}",val.headers);
                 *header = val.headers;
             }
         }
@@ -298,6 +297,10 @@ pub async fn handle_fn(
                 .extensions()
                 .get::<Arc<dyn crate::service::s3::ListBucketHandler + Send + Sync>>()
                 .cloned();
+            let getbkt_loc_obj = req
+                .extensions()
+                .get::<Arc<dyn crate::service::s3::GetBucketLocationHandler + Send + Sync>>()
+                .cloned();
             let req = Request::from(req);
             let url_path = req.url_path();
             log::info!("path is {}", url_path.trim_start_matches('/').is_empty());
@@ -339,6 +342,39 @@ pub async fn handle_fn(
                         return ret;
                     }
                 }
+            } 
+            if let Some(loc) = req.get_query("location") {
+                //get bucket location
+                return match getbkt_loc_obj {
+                    Some(bkt) => {
+                        match bkt
+                            .handle(if loc.is_empty() { None } else { Some(&loc) })
+                            .await
+                        {
+                            Ok(loc) => {
+                                let lc = match loc {
+                                    Some(loc) => bucket::LocationConstraint::new(loc),
+                                    None => bucket::LocationConstraint::new(""),
+                                };
+                                match quick_xml::se::to_string(&lc) {
+                                    Ok(content) => (StatusCode::OK, content).into_response(),
+                                    Err(err) => {
+                                        log::error!("xml encode error {err}");
+                                        (StatusCode::INTERNAL_SERVER_ERROR, b"").into_response()
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                log::error!("get bucket location error");
+                                (StatusCode::INTERNAL_SERVER_ERROR, b"").into_response()
+                            }
+                        }
+                    }
+                    None => {
+                        log::warn!("not open get bucket location method");
+                        (StatusCode::FORBIDDEN, b"").into_response()
+                    }
+                };
             }
             //get object
             match get_obj {
@@ -391,6 +427,52 @@ pub async fn handle_fn(
                         log::warn!("not open get delete bucket method");
                         (StatusCode::FORBIDDEN, b"").into_response()
                     }
+                }
+            }
+        }
+        axum::http::Method::HEAD => {
+            let head_obj = req
+                .extensions()
+                .get::<std::sync::Arc<dyn crate::service::s3::HeadHandler + Sync + Send>>()
+                .cloned();
+            if head_obj.is_none() {
+                log::warn!("not open head features");
+                return (StatusCode::INTERNAL_SERVER_ERROR, b"").into_response();
+            }
+            let head_obj = head_obj.unwrap();
+            let req = Request::from(req);
+            let raw_path = req.url_path();
+            let args = raw_path
+                .trim_start_matches('/')
+                .splitn(2, '/')
+                .collect::<Vec<&str>>();
+            if args.len() != 2 {
+                return (StatusCode::BAD_REQUEST, b"").into_response();
+            }
+            match head_obj.lookup(args[0], args[1]).await {
+                Ok(metadata) => match metadata {
+                    Some(head) => {
+                        use crate::authorization::v4::VHeader;
+                        let mut resp = Response::default();
+                        if let Some(v) = head.content_length {
+                            resp.set_header("content-length", v.to_string().as_str())
+                        }
+                        if let Some(v) = head.etag {
+                            resp.set_header("etag", &v);
+                        }
+                        if let Some(v) = head.content_type {
+                            resp.set_header("content-type", &v);
+                        }
+                        if let Some(v) = head.last_modified {
+                            resp.set_header("last-modified", &v);
+                        }
+                        (StatusCode::OK, b"").into_response()
+                    }
+                    None => (StatusCode::NOT_FOUND, b"").into_response(),
+                },
+                Err(err) => {
+                    log::error!("lookup object metadata error {err}");
+                    (StatusCode::INTERNAL_SERVER_ERROR, b"").into_response()
                 }
             }
         }
@@ -476,6 +558,26 @@ pub async fn handle_authorization_middleware(
     req.extensions_mut().insert(v4head);
     next.run(req).await
 }
+mod bucket {
+
+    #[derive(serde::Serialize, Debug)]
+    #[serde(rename = "LocationConstraint", rename_all = "PascalCase")]
+    pub struct LocationConstraint {
+        #[serde(rename = "$value")]
+        region: String,
+
+        #[serde(rename = "xmlns")]
+        _xmlns: &'static str,
+    }
+    impl LocationConstraint {
+        pub fn new<T: Into<String>>(region: T) -> Self {
+            Self {
+                region: region.into(),
+                _xmlns: "http://s3.amazonaws.com/doc/2006-03-01/",
+            }
+        }
+    }
+}
 #[cfg(test)]
 mod itest {
     use std::sync::Arc;
@@ -533,11 +635,17 @@ mod itest {
             >,
         > {
             Box::pin(async move {
-                let mut ret: HeadObjectResult=Default::default();
-                ret.checksum_sha256=Some("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".to_string());
-                ret.content_length=Some(5);
-                ret.etag=Some("5d41402abc4b2a76b9719d911017c592".to_string());
-                ret.last_modified=Some(chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string());
+                let mut ret: HeadObjectResult = Default::default();
+                ret.checksum_sha256 = Some(
+                    "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".to_string(),
+                );
+                ret.content_length = Some(5);
+                ret.etag = Some("5d41402abc4b2a76b9719d911017c592".to_string());
+                ret.last_modified = Some(
+                    chrono::Utc::now()
+                        .format("%a, %d %b %Y %H:%M:%S GMT")
+                        .to_string(),
+                );
                 Ok(Some(ret))
             })
         }
@@ -611,6 +719,7 @@ mod itest {
             &'a self,
             bucket: &str,
             object: &str,
+            opt: crate::service::s3::GetObjectOption,
             mut out: tokio::sync::Mutex<
                 std::pin::Pin<
                     std::boxed::Box<(dyn crate::utils::io::PollWrite + Send + Unpin + 'a)>,
@@ -627,6 +736,7 @@ mod itest {
             })
         }
     }
+    impl crate::service::s3::GetBucketLocationHandler for Target{}
     #[tokio::test]
     async fn test_server() -> Result<(), Box<dyn std::error::Error>> {
         let _ = tokio::fs::create_dir_all(".sys_bws").await;
@@ -662,6 +772,8 @@ mod itest {
             ))
             .layer(axum::Extension(
                 target.clone() as Arc<dyn GetObjectHandler + Send + Sync>
+            )).layer(axum::Extension(
+                target.clone() as Arc<dyn GetBucketLocationHandler + Send + Sync>
             ));
         let l = tokio::net::TcpListener::bind("0.0.0.0:9900").await?;
         axum::serve(l, r).await?;

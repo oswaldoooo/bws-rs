@@ -153,12 +153,18 @@ pub trait HeadHandler {
         >,
     >;
 }
+#[derive(Default)]
+pub struct GetObjectOption {
+    // pub range:(Option<usize>,Option<usize>),
+    // pub accept_encoding:Option<Vec<String>>,
+}
 
 pub trait GetObjectHandler: HeadHandler {
     fn handle<'a>(
         &'a self,
         bucket: &str,
         object: &str,
+        opt: GetObjectOption,
         out: tokio::sync::Mutex<
             std::pin::Pin<Box<dyn 'a + Send + crate::utils::io::PollWrite + Unpin>>,
         >,
@@ -311,6 +317,7 @@ pub async fn handle_get_object<T: VRequest, F: VResponse>(
         resp.send_header();
         return;
     }
+    let opt = GetObjectOption::default();
     let next = r.unwrap();
     let bucket = &raw[..next];
     let object = &raw[next + 1..];
@@ -350,7 +357,7 @@ pub async fn handle_get_object<T: VRequest, F: VResponse>(
         match resp.get_body_writer().await {
             Ok(body) => {
                 let ret = handler
-                    .handle(bucket, object, tokio::sync::Mutex::new(Box::pin(body)))
+                    .handle(bucket, object, opt, tokio::sync::Mutex::new(Box::pin(body)))
                     .await;
                 if let Err(err) = ret {
                     Err(err)
@@ -458,6 +465,16 @@ pub trait ListBucketHandler {
         &'a self,
         opt: &'a ListBucketsOption,
     ) -> std::pin::Pin<Box<dyn 'a + Send + std::future::Future<Output = Result<Vec<Bucket>, String>>>>;
+}
+pub trait GetBucketLocationHandler {
+    fn handle<'a>(
+        &'a self,
+        loc: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<dyn 'a + Send + std::future::Future<Output = Result<Option<&'static str>, ()>>>,
+    > {
+        Box::pin(async { Ok(Some("us-west-1")) })
+    }
 }
 #[derive(Debug)]
 pub struct ListBucketsOption {
