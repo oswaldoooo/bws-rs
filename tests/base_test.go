@@ -72,6 +72,3 @@ func TestCreateBucket(t *testing.T) {
 	// 	t.Log(bkt)
 	// }
 }
-
-// func TestS3Sdk(t *testing.T) {
-// }

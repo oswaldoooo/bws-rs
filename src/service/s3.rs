@@ -54,6 +54,17 @@ pub trait BodyReader {
         Box<dyn 'b + Send + std::future::Future<Output = Result<Self::BodyReader, String>>>,
     >;
 }
+pub trait HeaderTaker {
+    type Head: crate::authorization::v4::VHeader;
+    fn take_header(&self) -> Self::Head;
+}
+pub trait VRequestPlus: VRequest {
+    fn body<'a>(
+        self,
+    ) -> std::pin::Pin<
+        Box<dyn 'a + Send + std::future::Future<Output = Result<Vec<u8>, std::io::Error>>>,
+    >;
+}
 pub trait VResponse: crate::authorization::v4::VHeader + BodyWriter {
     fn set_status(&mut self, status: u16);
     fn send_header(&mut self);
@@ -659,7 +670,7 @@ pub trait PutObjectHandler {
 }
 pub async fn handle_put_object<T: VRequest + BodyReader, F: VResponse>(
     mut v4head: crate::authorization::v4::V4Head,
-    req: T,
+    mut req: T,
     resp: &mut F,
     handler: &std::sync::Arc<dyn PutObjectHandler + Send + Sync>,
 ) {
@@ -951,7 +962,312 @@ pub async fn handle_delete_object<T: VRequest, F: VResponse>(
         resp.set_status(204);
     }
 }
-
+pub struct MultiUploadObjectCompleteOption {
+    pub if_match: Option<String>,
+    pub if_none_match: Option<String>,
+}
+pub trait MultiUploadObjectHandler {
+    fn handle_create_session<'a>(
+        &'a self,
+        bucket: &'a str,
+        key: &'a str,
+    ) -> std::pin::Pin<Box<dyn 'a + Send + std::future::Future<Output = Result<String, ()>>>>;
+    ///return etag
+    fn handle_upload_part<'a>(
+        &'a self,
+        bucket: &'a str,
+        key: &'a str,
+        upload_id: &'a str,
+        part_number: u32,
+        body: &'a mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> std::pin::Pin<Box<dyn 'a + Send + std::future::Future<Output = Result<String, ()>>>>;
+    fn handle_complete<'a>(
+        &'a self,
+        bucket: &'a str,
+        key: &'a str,
+        upload_id: &'a str,
+        //(etag,part number)
+        data: &'a [(&'a str, u32)],
+        opts: MultiUploadObjectCompleteOption,
+    ) -> std::pin::Pin<Box<dyn 'a + Send + std::future::Future<Output = Result<String, ()>>>>;
+    fn handle_abort<'a>(
+        &'a self,
+        bucket: &'a str,
+        key: &'a str,
+        upload_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn 'a + Send + std::future::Future<Output = Result<(), ()>>>>;
+}
+pub async fn handle_multipart_create_session<T: VRequest, F: VResponse>(
+    req: T,
+    resp: &mut F,
+    handler: &std::sync::Arc<dyn MultiUploadObjectHandler + Send + Sync>,
+) {
+    let raw_path = req.url_path();
+    let raw = raw_path
+        .trim_start_matches('/')
+        .splitn(2, '/')
+        .collect::<Vec<&str>>();
+    if raw.len() != 2 {
+        resp.set_status(400);
+        resp.send_header();
+        return;
+    }
+    let bucket = raw[0];
+    let key = raw[1];
+    match handler.handle_create_session(bucket, key).await {
+        Ok(upload_id) => {
+            #[derive(Debug, serde::Serialize)]
+            #[serde(rename_all = "PascalCase")]
+            pub struct MultipartInitResponse<'a> {
+                #[serde(rename = "Bucket")]
+                pub bucket: &'a str,
+                #[serde(rename = "Key")]
+                pub key: &'a str,
+                #[serde(rename = "UploadId")]
+                pub upload_id: &'a str,
+            }
+            let r = MultipartInitResponse {
+                bucket,
+                key,
+                upload_id: &upload_id,
+            };
+            let is_err = match quick_xml::se::to_string(&r) {
+                Ok(content) => match resp.get_body_writer().await {
+                    Ok(mut w) => {
+                        let _ = w.poll_write(content.as_bytes()).await;
+                        None
+                    }
+                    Err(err) => {
+                        log::error!("get body writer error {err}");
+                        Some(())
+                    }
+                },
+                Err(err) => {
+                    log::error!("xml encode error {err}");
+                    Some(())
+                }
+            };
+            if is_err.is_some() {
+                resp.set_status(500);
+                resp.send_header();
+            }
+        }
+        Err(_) => {
+            log::error!("handle create session error");
+            resp.set_status(500);
+            resp.send_header();
+        }
+    }
+}
+pub async fn handle_multipart_upload_part<T: VRequest + BodyReader + HeaderTaker, F: VResponse>(
+    req: T,
+    resp: &mut F,
+    handler: &std::sync::Arc<dyn MultiUploadObjectHandler + Send + Sync>,
+) {
+    let upload_id = req.get_query("uploadId");
+    let part_number = req.get_query("partNumber");
+    if upload_id.is_none() || part_number.is_none() {
+        resp.set_status(400);
+    } else {
+        let ret = u32::from_str_radix(part_number.unwrap().as_str(), 10);
+        if ret.is_err() {
+            resp.set_status(400);
+            return;
+        }
+        let part_number = ret.unwrap();
+        let raw_path = req.url_path();
+        let raw = raw_path
+            .trim_start_matches('/')
+            .splitn(2, '/')
+            .collect::<Vec<&str>>();
+        if raw.len() != 2 {
+            resp.set_status(400);
+            return;
+        }
+        let header = req.take_header();
+        let body_reader = match req.get_body_reader().await {
+            Ok(body_reader) => body_reader,
+            Err(err) => {
+                log::error!("get body reader failed {err}");
+                resp.set_status(500);
+                resp.send_header();
+                return;
+            }
+        };
+        let (body, release) = match get_body_stream(body_reader, &header).await {
+            Ok(data) => data,
+            Err(err) => {
+                log::error!("get body stream error {err}");
+                resp.set_status(500);
+                resp.send_header();
+                return;
+            }
+        };
+        let ret = match body {
+            StreamType::File(mut file) => {
+                handler
+                    .handle_upload_part(
+                        raw[0],
+                        raw[1],
+                        upload_id.unwrap().as_str(),
+                        part_number,
+                        &mut file,
+                    )
+                    .await
+            }
+            StreamType::Buff(mut buf_reader) => {
+                handler
+                    .handle_upload_part(
+                        raw[0],
+                        raw[1],
+                        upload_id.unwrap().as_str(),
+                        part_number,
+                        &mut buf_reader,
+                    )
+                    .await
+            }
+        };
+        if let Some(release) = release {
+            release.await;
+        }
+        if let Ok(etag) = ret {
+            resp.set_header("etag", &etag);
+        } else {
+            resp.set_status(500);
+            resp.send_header();
+        }
+    }
+}
+pub async fn handle_multipart_complete_session<T: VRequestPlus, F: VResponse>(
+    req: T,
+    resp: &mut F,
+    handler: &std::sync::Arc<dyn MultiUploadObjectHandler + Send + Sync>,
+) {
+    let raw_path = req.url_path();
+    let raw = raw_path
+        .trim_start_matches('/')
+        .splitn(2, '/')
+        .collect::<Vec<&str>>();
+    if raw.len() != 2 {
+        resp.set_status(400);
+        resp.send_header();
+        return;
+    }
+    let bucket = raw[0];
+    let key = raw[1];
+    let upload_id = req.get_query("uploadId");
+    if let Some(upload_id) = upload_id {
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        pub struct CompleteMultiPartUploadRequest {
+            #[serde(rename = "Part")]
+            pub parts: Vec<CompletedPart>,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        pub struct CompletedPart {
+            #[serde(rename = "ETag")]
+            pub etag: String,
+            #[serde(rename = "PartNumber")]
+            pub part_number: u32,
+        }
+        match req.body().await {
+            Ok(body) => {
+                match quick_xml::de::from_str::<CompleteMultiPartUploadRequest>(unsafe {
+                    std::str::from_utf8_unchecked(&body)
+                }) {
+                    Ok(upload_request) => {
+                        let data = upload_request
+                            .parts
+                            .iter()
+                            .map(|data| (data.etag.as_str(), data.part_number))
+                            .collect::<Vec<(&str, u32)>>();
+                        match handler
+                            .handle_complete(
+                                bucket,
+                                key,
+                                &upload_id,
+                                &data,
+                                MultiUploadObjectCompleteOption {
+                                    if_match: None,
+                                    if_none_match: None,
+                                },
+                            )
+                            .await
+                        {
+                            Ok(etag) => {
+                                use serde::{Deserialize, Serialize};
+                                #[derive(Debug, Serialize, Deserialize)]
+                                #[serde(rename_all = "PascalCase")]
+                                pub struct CompleteMultipartUploadResponse<'a> {
+                                    #[serde(rename = "Location")]
+                                    pub location: &'a str,
+                                    #[serde(rename = "Bucket")]
+                                    pub bucket: &'a str,
+                                    #[serde(rename = "Key")]
+                                    pub key: &'a str,
+                                    #[serde(rename = "ETag")]
+                                    pub etag: &'a str,
+                                }
+                                let r = CompleteMultipartUploadResponse {
+                                    location: "",
+                                    bucket,
+                                    key,
+                                    etag: &etag,
+                                };
+                                match quick_xml::se::to_string(&r) {
+                                    Ok(content) => {
+                                        let err = match resp.get_body_writer().await {
+                                            Ok(mut w) => {
+                                                let _ = w.poll_write(content.as_bytes()).await;
+                                                None
+                                            }
+                                            Err(err) => Some(err),
+                                        };
+                                        if let Some(err) = err {
+                                            log::error!("get body writer error {err}");
+                                            resp.set_status(500);
+                                            resp.send_header();
+                                        }
+                                    }
+                                    Err(err) => {
+                                        log::error!("quick xml encode error {err}");
+                                        resp.set_status(500);
+                                        resp.send_header();
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                log::error!("handle_complete error");
+                                resp.set_status(500);
+                                resp.send_header();
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        resp.set_status(400);
+                        resp.send_header();
+                    }
+                }
+            }
+            Err(err) => {
+                log::error!("read body error {err}");
+                resp.set_status(500);
+                resp.send_header();
+            }
+        }
+    } else {
+        resp.set_status(400);
+        resp.send_header();
+    }
+}
+pub async fn handle_multipart_abort_session<T: VRequest, F: VResponse>(
+    req: T,
+    resp: &mut F,
+    handler: &std::sync::Arc<dyn MultiUploadObjectHandler + Send + Sync>,
+) {
+    todo!()
+}
 pub struct CreateBucketOption {
     pub grant_full_control: Option<String>,
     pub grant_read: Option<String>,
@@ -1254,11 +1570,93 @@ pub async fn handle_delete_bucket<T: VRequest, F: VResponse>(
 }
 
 //utils
-
+#[derive(Debug)]
 enum ParseBodyError {
     HashNoMatch,
     ContentLengthIncorrect,
     Io(String),
+}
+impl Display for ParseBodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ParseBodyError::HashNoMatch => "hash no match",
+            ParseBodyError::ContentLengthIncorrect => "content length incorrect",
+            ParseBodyError::Io(err) => err.as_str(),
+        })
+    }
+}
+impl std::error::Error for ParseBodyError {}
+enum StreamType {
+    File(tokio::fs::File),
+    Buff(tokio::io::BufReader<std::io::Cursor<Vec<u8>>>),
+}
+async fn get_body_stream<
+    T: crate::utils::io::PollRead + Send,
+    H: crate::authorization::v4::VHeader,
+>(
+    src: T,
+    header: &H,
+) -> Result<
+    (
+        StreamType,
+        Option<std::pin::Pin<Box<dyn Send + std::future::Future<Output = ()>>>>,
+    ),
+    ParseBodyError,
+> {
+    let cl = header.get_header("content-length");
+    let acs = header
+        .get_header("x-amz-content-sha256")
+        .ok_or(ParseBodyError::HashNoMatch)?;
+    if let Some(cl) = cl {
+        let cl = cl
+            .as_str()
+            .parse::<usize>()
+            .or(Err(ParseBodyError::ContentLengthIncorrect))?;
+        if acs.as_str() != "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" {
+            if cl <= 10 << 20 {
+                let mut buff = vec![0u8; cl];
+                parse_body(src, &mut buff, &acs, cl).await?;
+                return Ok((
+                    StreamType::Buff(tokio::io::BufReader::new(std::io::Cursor::new(buff))),
+                    None,
+                ));
+            } else {
+                let file_name = format!(".sys_bws/{}", crate::random_str!(4));
+                let mut fd = tokio::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o644)
+                    .open(file_name.as_str())
+                    .await
+                    .map_err(|err| ParseBodyError::Io(err.to_string()))?;
+                parse_body(src, &mut fd, &acs, cl).await?;
+                drop(fd);
+                match tokio::fs::OpenOptions::new()
+                    .read(true)
+                    .open(file_name.as_str())
+                    .await
+                {
+                    Ok(fd) => {
+                        return Ok((
+                            StreamType::File(fd),
+                            Some({
+                                Box::pin(async move {
+                                    let _ = tokio::fs::remove_file(file_name.as_str()).await;
+                                })
+                            }),
+                        ))
+                    }
+                    Err(err) => {
+                        let _ = tokio::fs::remove_file(file_name.as_str()).await;
+                        return Err(ParseBodyError::Io(err.to_string()));
+                    }
+                }
+                // return Ok(())
+            }
+        }
+    }
+    //chunk
+    todo!()
 }
 
 async fn parse_body<

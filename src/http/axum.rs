@@ -81,6 +81,23 @@ impl crate::service::s3::VRequest for Request {
             .map(|query| query.iter().all(|(k, v)| cb(k, v)));
     }
 }
+impl crate::service::s3::VRequestPlus for Request {
+    fn body<'a>(
+        self,
+    ) -> std::pin::Pin<
+        Box<dyn 'a + Send + std::future::Future<Output = Result<Vec<u8>, std::io::Error>>>,
+    > {
+        Box::pin(async move {
+            let mut bodystream = self.request.into_body().into_data_stream();
+            let mut ret = Vec::new();
+            while let Some(bodystream) = bodystream.next().await {
+                let bytes = bodystream.map_err(std::io::Error::other)?;
+                ret.extend_from_slice(bytes.iter().as_slice());
+            }
+            Ok(ret)
+        })
+    }
+}
 pub struct BodyReader(axum_core::body::BodyDataStream);
 impl crate::utils::io::PollRead for BodyReader {
     fn poll_read<'a>(
@@ -112,6 +129,40 @@ impl crate::service::s3::BodyReader for Request {
             let ret: axum::body::Body = self.request.into_body();
             Ok(BodyReader(ret.into_data_stream()))
         })
+    }
+}
+pub struct HeaderWarp(axum::http::HeaderMap);
+impl crate::authorization::v4::VHeader for HeaderWarp {
+    fn get_header(&self, key: &str) -> Option<String> {
+        self.0
+            .get(key)
+            .and_then(|value| value.to_str().ok().map(|value| value.to_string()))
+    }
+
+    fn set_header(&mut self, key: &str, val: &str) {
+        let key: axum::http::HeaderName = key.to_string().parse().unwrap();
+        self.0.insert(key, val.parse().unwrap());
+    }
+
+    fn delete_header(&mut self, key: &str) {
+        self.0.remove(key);
+    }
+
+    fn rng_header(&self, mut cb: impl FnMut(&str, &str) -> bool) {
+        for (k, v) in self.0.iter() {
+            if !cb(k.as_str(), unsafe {
+                std::str::from_utf8_unchecked(v.as_bytes())
+            }) {
+                return;
+            }
+        }
+    }
+}
+impl crate::service::s3::HeaderTaker for Request {
+    type Head = HeaderWarp;
+
+    fn take_header(&self) -> Self::Head {
+        HeaderWarp(self.request.headers().clone())
     }
 }
 pub struct Response {
@@ -220,7 +271,10 @@ pub async fn handle_fn(
     use crate::service::s3::*;
     use axum::http::StatusCode;
     use std::sync::Arc;
-
+    let multipart_obj = req
+        .extensions()
+        .get::<Arc<dyn MultiUploadObjectHandler + Send + Sync>>()
+        .cloned();
     match *req.method() {
         axum::http::Method::PUT => {
             let put_obj = req
@@ -265,6 +319,29 @@ pub async fn handle_fn(
                         }
                     }
                 } else {
+                    let xid = req.get_query("x-id");
+                    if let Some(xid) = xid {
+                        if xid.as_str() == "UploadPart" {
+                            let mut resp = Response::default();
+
+                            // let upload_id = req.get_query("uploadId");
+                            // let part_number = req.get_query("partNumber");
+                            // if upload_id.is_none() || part_number.is_none() {
+                            //     return (axum::http::StatusCode::BAD_REQUEST, b"").into_response();
+                            // }
+
+                            return match multipart_obj {
+                                Some(multipart_obj) => {
+                                    handle_multipart_upload_part(req, &mut resp, &multipart_obj)
+                                        .await;
+                                    resp.into()
+                                }
+                                None => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, b"")
+                                    .into_response(),
+                            };
+                        }
+                    }
+
                     //put object
                     match put_obj {
                         Some(put_obj) => {
@@ -342,7 +419,7 @@ pub async fn handle_fn(
                         return ret;
                     }
                 }
-            } 
+            }
             if let Some(loc) = req.get_query("location") {
                 //get bucket location
                 return match getbkt_loc_obj {
@@ -476,6 +553,29 @@ pub async fn handle_fn(
                 }
             }
         }
+        axum::http::Method::POST => match multipart_obj {
+            Some(multipart_obj) => {
+                let mut resp = Response::default();
+                let is_create_session = if let Some(query) = req.uri().query() {
+                    query.contains("uploads=")
+                } else {
+                    false
+                };
+                let req = Request::from(req);
+                if is_create_session {
+                    handle_multipart_create_session(req, &mut resp, &multipart_obj).await;
+                } else if req.get_query("uploadId").is_some() {
+                    handle_multipart_complete_session(req, &mut resp, &multipart_obj).await;
+                } else {
+                    return (StatusCode::BAD_REQUEST, b"").into_response();
+                }
+                resp.into()
+            }
+            None => {
+                log::warn!("not open multipart object features");
+                (StatusCode::INTERNAL_SERVER_ERROR, b"").into_response()
+            }
+        },
         _ => (StatusCode::METHOD_NOT_ALLOWED, b"").into_response(),
     }
 }
@@ -736,7 +836,63 @@ mod itest {
             })
         }
     }
-    impl crate::service::s3::GetBucketLocationHandler for Target{}
+    impl crate::service::s3::GetBucketLocationHandler for Target {}
+    impl MultiUploadObjectHandler for Target {
+        fn handle_create_session<'a>(
+            &'a self,
+            bucket: &'a str,
+            key: &'a str,
+        ) -> std::pin::Pin<Box<dyn 'a + Send + std::future::Future<Output = Result<String, ()>>>>
+        {
+            Box::pin(async move { Ok("ffffff".to_string()) })
+        }
+
+        fn handle_upload_part<'a>(
+            &'a self,
+            bucket: &'a str,
+            key: &'a str,
+            upload_id: &'a str,
+            part_number: u32,
+            body: &'a mut (dyn tokio::io::AsyncRead + Unpin + Send),
+        ) -> std::pin::Pin<Box<dyn 'a + Send + std::future::Future<Output = Result<String, ()>>>>
+        {
+            Box::pin(async move {
+                let mut buff = Vec::new();
+                let size = body
+                    .read_to_end(&mut buff)
+                    .await
+                    .map_err(|err| log::error!("read body error {err}"))?;
+                println!(
+                    "upload part upload_id={upload_id} part_number={part_number} bucket={bucket} key={key}\n{}",
+                    unsafe { std::str::from_boxed_utf8_unchecked((&buff[..size]).into()) }
+                );
+                Ok("5d41402abc4b2a76b9719d911017c592".to_string())
+            })
+        }
+
+        fn handle_complete<'a>(
+            &'a self,
+            bucket: &'a str,
+            key: &'a str,
+            upload_id: &'a str,
+            //(etag,part number)
+            data: &'a [(&'a str, u32)],
+            opts: MultiUploadObjectCompleteOption,
+        ) -> std::pin::Pin<Box<dyn 'a + Send + std::future::Future<Output = Result<String, ()>>>>
+        {
+            Box::pin(async move { Ok("69a329523ce1ec88bf63061863d9cb14".to_string()) })
+        }
+
+        fn handle_abort<'a>(
+            &'a self,
+            bucket: &'a str,
+            key: &'a str,
+            upload_id: &'a str,
+        ) -> std::pin::Pin<Box<dyn 'a + Send + std::future::Future<Output = Result<(), ()>>>>
+        {
+            todo!()
+        }
+    }
     #[tokio::test]
     async fn test_server() -> Result<(), Box<dyn std::error::Error>> {
         let _ = tokio::fs::create_dir_all(".sys_bws").await;
@@ -772,8 +928,11 @@ mod itest {
             ))
             .layer(axum::Extension(
                 target.clone() as Arc<dyn GetObjectHandler + Send + Sync>
-            )).layer(axum::Extension(
+            ))
+            .layer(axum::Extension(
                 target.clone() as Arc<dyn GetBucketLocationHandler + Send + Sync>
+            )).layer(axum::Extension(
+                target.clone() as Arc<dyn MultiUploadObjectHandler + Send + Sync>
             ));
         let l = tokio::net::TcpListener::bind("0.0.0.0:9900").await?;
         axum::serve(l, r).await?;
