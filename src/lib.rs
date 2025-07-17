@@ -1,18 +1,27 @@
-pub mod authorization;pub mod error;mod utils;pub mod service;
+pub mod authorization;
+pub mod error;
+pub mod service;
+mod utils;
+pub mod http;
+pub type GenericResult<T> = Result<T, String>;
+#[cfg(target_family = "unix")]
+pub async fn random(buff: &mut [u8]) -> Result<usize, std::io::Error> {
+    use tokio::io::AsyncReadExt;
 
-pub type GenericResult<T>=Result<T,Box<dyn std::error::Error>>;
-
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+    let mut fd = tokio::fs::OpenOptions::new()
+        .read(true)
+        .open("/dev/urandom")
+        .await?;
+    let ret = fd.read_exact(buff).await?;
+    Ok(ret)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+#[macro_export]
+macro_rules! random_str {
+    ($need_size:expr) => {
+        {
+            let mut buff=[0u8;$need_size];
+            let _=crate::random(&mut buff).await;
+            hex::encode(buff)
+        }
+    };
 }

@@ -1,7 +1,7 @@
-extern crate hmac;use self::hmac::{Hmac, Mac};
+extern crate hmac;
+use self::hmac::{Hmac, Mac};
 
 use crate::GenericResult;
-use crate::error::Error;
 fn get_v2_signature(
     secretkey: &str,
     method: &str,
@@ -12,7 +12,7 @@ fn get_v2_signature(
     let tosign = format!("{method}\n\n{content_type}\n{date}\n{url_path}");
     let hsh = Hmac::<sha1::Sha1>::new_from_slice(secretkey.as_bytes());
     if let Err(err) = hsh {
-        return Err(Box::new(Error::Other(format!("{err}"))));
+        return Err(err.to_string());
     }
     let mut hsh = hsh.unwrap();
     hsh.update(tosign.as_bytes());

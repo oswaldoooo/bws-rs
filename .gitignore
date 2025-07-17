@@ -1,2 +1,4 @@
 /target
 Cargo.lock
+/.sys_bws
+/tests/test.txt

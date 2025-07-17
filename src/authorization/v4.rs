@@ -10,34 +10,103 @@ pub trait VHeader {
     fn rng_header(&self, cb: impl FnMut(&str, &str) -> bool);
 }
 use crate::{error::Error, GenericResult};
-
-fn get_v4_signature<T: VHeader>(
+#[derive(Debug)]
+pub struct BaseArgs {
+    pub region: String,
+    pub service: String,
+    pub access_key: String,
+    pub content_hash: String,
+    pub signed_headers: Vec<String>,
+    pub signature: String,
+    pub date: String,
+}
+pub fn extract_args<R: VHeader>(r: &R) -> Result<BaseArgs, ()> {
+    let authorization = r.get_header("authorization").ok_or(())?;
+    let authorization = authorization.trim();
+    let heads = authorization.splitn(2, ' ').collect::<Vec<&str>>();
+    if heads.len() != 2 {
+        return Err(());
+    }
+    match heads[0] {
+        "AWS4-HMAC-SHA256" => {
+            let heads = heads[1].split(',').collect::<Vec<&str>>();
+            if heads.len() != 3 {
+                return Err(());
+            }
+            let mut credential = None;
+            let mut singed_headers = None;
+            let mut signature = None;
+            for head in heads {
+                let heads = head.trim().splitn(2, '=').collect::<Vec<&str>>();
+                if heads.len() != 2 {
+                    return Err(());
+                }
+                match heads[0] {
+                    "Credential" => {
+                        let heads = heads[1].split('/').collect::<Vec<&str>>();
+                        if heads.len() != 5 {
+                            return Err(());
+                        }
+                        credential = Some((heads[0], heads[1], heads[2], heads[3], heads[4]));
+                    }
+                    "SignedHeaders" => {
+                        singed_headers = Some(heads[1].split(';').collect::<Vec<&str>>());
+                    }
+                    "Signature" => {
+                        signature = Some(heads[1]);
+                    }
+                    _ => {
+                        return Err(());
+                    }
+                }
+            }
+            if signature.is_none() || singed_headers.is_none() || credential.is_none() {
+                return Err(());
+            }
+            let signature = signature.unwrap();
+            let singed_headers = singed_headers.unwrap();
+            let credential = credential.unwrap();
+            Ok(BaseArgs {
+                content_hash: r.get_header("x-amz-content-sha256").ok_or(())?,
+                region: credential.2.to_string(),
+                service: credential.3.to_string(),
+                access_key: credential.0.to_string(),
+                signed_headers: singed_headers.into_iter().map(|v| v.to_string()).collect(),
+                signature: signature.to_string(),
+                date: credential.1.to_string(),
+            })
+        }
+        _ => Err(()),
+    }
+}
+pub fn get_v4_signature<'a, T: VHeader, S: ToString>(
     req: &T,
     method: &str,
     region: &str,
-    service:&str,
+    service: &str,
     url_path: &str,
     secretkey: &str,
     content_hash: &str,
-    signed_headers: &[&str],
+    signed_headers: &[S],
     mut query: Vec<crate::utils::BaseKv<String, String>>,
-) -> GenericResult<String> {
+) -> GenericResult<(String, HmacSha256CircleHasher)> {
     let xamz_date = req.get_header("x-amz-date");
     if xamz_date.is_none() {
-        return Err(Box::new(Error::Illegal));
+        return Err(Error::Illegal.to_string());
     }
     let xamz_date = xamz_date.unwrap();
     let ans: Vec<String> = signed_headers
         .iter()
         .map(|v| {
-            let val = req.get_header(*v);
+            let v = v.to_string();
+            let val = req.get_header(&v);
             match val {
-                Some(val) => format!("{}:{val}", *v),
-                None => format!("{}:", *v),
+                Some(val) => format!("{}:{val}", v),
+                None => format!("{}:", v),
             }
         })
         .collect();
-    query.sort_by(|a, b| (&a.key).cmp(&b.key));
+    query.sort_by(|a, b| a.key.cmp(&b.key));
     let query: Vec<String> = query
         .iter()
         .map(|v| format!("{}={}", v.key, v.val))
@@ -45,8 +114,12 @@ fn get_v4_signature<T: VHeader>(
     let tosign = format!(
         "{method}\n{url_path}\n{}\n{}\n\n{}\n{}",
         query.join("&"),
-        ans.join("\n").to_string(),
-        signed_headers.join(";").to_string(),
+        ans.join("\n"),
+        signed_headers
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<String>>()
+            .join(";"),
         content_hash
     );
     let ksign = get_v4_ksigning(secretkey, region, &xamz_date)?;
@@ -66,12 +139,16 @@ fn get_v4_signature<T: VHeader>(
     // println!("tosign:{tosign}");
     let ret = Hmac::<sha2::Sha256>::new_from_slice(buff);
     if let Err(err) = ret {
-        return Err(Box::new(Error::Other(format!("{err}"))));
+        return Err(err.to_string());
     }
     let mut hsh = ret.unwrap();
     hsh.update(tosign.as_bytes());
     let ans = hsh.finalize().into_bytes();
-    Ok(hex::encode(ans))
+    let hsh = hex::encode(ans);
+    Ok((
+        hsh.clone(),
+        HmacSha256CircleHasher::new(ksign, hsh, xamz_date, region.to_string()),
+    ))
 }
 fn get_v4_ksigning(secretkey: &str, region: &str, xamz_date: &str) -> GenericResult<[u8; 32]> {
     let mut ksign = [0u8; 32];
@@ -91,7 +168,7 @@ fn get_v4_ksigning(secretkey: &str, region: &str, xamz_date: &str) -> GenericRes
 fn circle_hmac_sha256(initkey: &str, values: &[&[u8]], target: &mut [u8]) -> GenericResult<()> {
     let ret = Hmac::<sha2::Sha256>::new_from_slice(initkey.as_bytes());
     if let Err(err) = ret {
-        return Err(Box::new(Error::Other(format!("{err}"))));
+        return Err(err.to_string());
     }
     let mut hsh = ret.unwrap();
     hsh.update(values[0]);
@@ -103,14 +180,14 @@ fn circle_hmac_sha256(initkey: &str, values: &[&[u8]], target: &mut [u8]) -> Gen
                 next = hsh.finalize().into_bytes();
             }
             Err(err) => {
-                return Err(Box::new(Error::Other(format!("{err}"))));
+                return Err(err.to_string());
             }
         }
     }
     target[0..next.len()].copy_from_slice(&next);
     Ok(())
 }
-
+#[derive(Clone)]
 pub struct HmacSha256CircleHasher {
     ksigning: [u8; 32],
     last_hash: String,
@@ -145,7 +222,35 @@ impl HmacSha256CircleHasher {
         Ok(ans)
     }
 }
-
+#[derive(Clone)]
+pub struct V4Head {
+    signature: String,
+    region: String,
+    accesskey: String,
+    circle_hasher:HmacSha256CircleHasher,
+}
+impl V4Head {
+    pub fn new(signature: String, region: String, accesskey: String,hasher:HmacSha256CircleHasher) -> Self {
+        Self {
+            signature,
+            region,
+            accesskey,
+            circle_hasher:hasher,
+        }
+    }
+    pub fn signature(&self) -> &str {
+        &self.signature
+    }
+    pub fn region(&self) -> &str {
+        &self.region
+    }
+    pub fn accesskey(&self) -> &str {
+        &self.accesskey
+    }
+    pub fn hasher(&mut self)->&mut HmacSha256CircleHasher{
+        &mut self.circle_hasher
+    }
+}
 #[cfg(test)]
 mod v4test {
     use std::{collections::HashMap, io::Write};
@@ -183,7 +288,7 @@ mod v4test {
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
         );
         hm.insert("host".to_string(), "127.0.0.1:9000".to_string());
-        let signature = super::get_v4_signature(
+        let (signature,_) = super::get_v4_signature(
             &hm,
             "GET",
             "us-east-1",
@@ -208,7 +313,7 @@ mod v4test {
         );
         hm.insert("host".to_string(), "127.0.0.1:9000".to_string());
         hm.insert("x-amz-decoded-content-length".to_string(), "6".to_string());
-        let signature = super::get_v4_signature(
+        let (signature,_) = super::get_v4_signature(
             &hm,
             "PUT",
             "us-east-1",
@@ -237,7 +342,7 @@ mod v4test {
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
         );
         hm.insert("host".to_string(), "127.0.0.1:9000".to_string());
-        let signature = super::get_v4_signature(
+        let (signature,_) = super::get_v4_signature(
             &hm,
             "GET",
             "us-east-1",
@@ -259,7 +364,7 @@ mod v4test {
         Ok(())
     }
     #[test]
-    fn v4_chunk_signature_test() -> GenericResult<()> {
+    fn v4_chunk_signature_test() -> Result<(), Box<dyn std::error::Error>> {
         let mut hm = HashMap::new();
         hm.insert("x-amz-date".to_string(), "20250407T060526Z".to_string());
         hm.insert(
@@ -268,7 +373,7 @@ mod v4test {
         );
         hm.insert("host".to_string(), "127.0.0.1:9000".to_string());
         hm.insert("x-amz-decoded-content-length".to_string(), "6".to_string());
-        let headersignature = super::get_v4_signature(
+        let (headersignature,_) = super::get_v4_signature(
             &hm,
             "PUT",
             "us-east-1",

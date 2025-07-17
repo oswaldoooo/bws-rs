@@ -3,8 +3,12 @@ name = "bws-rs"
 version = "0.1.0"
 edition = "2021"
 [dependencies]
+axum = { version = "0.8.4", features = ["macros"] }
+axum-core = "0.5.2"
 base64 = "0.22.1"
 chrono = "0.4.40"
+env_logger = "0.11.8"
+futures = "0.3.31"
 hex = "0.4.3"
 hmac = "0.12.1"
 log = "0.4.27"
@@ -12,3 +16,4 @@ quick-xml = { version = "0.37.4", features = ["serde", "serialize"] }
 serde = { version = "1.0.219", features = ["derive"] }
 sha1 = "0.10.6"
 sha2 = "0.10.8"
+tokio = { version = "1.46.1", features = ["full"] }
