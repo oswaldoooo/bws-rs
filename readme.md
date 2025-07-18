@@ -11,9 +11,9 @@ aws backend service framework
 - [x] head bucket
 - [x] list bucket
 - [x] delete bucket
-- [ ] get bucket location
+- [x] get bucket location
 - [ ] range get
-- [ ] multipart upload
+- [x] multipart upload
 - [ ] get object acl
 - [ ] set object acl
 - [ ] get bucket acl
