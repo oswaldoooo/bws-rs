@@ -2,6 +2,12 @@
 name = "bws-rs"
 version = "0.1.0"
 edition = "2021"
+description = "rust s3 backend service framework, quick build yourself s3 gateway, or object storage"
+homepage = "https://github.com/oswaldoooo/bws-rs"
+documentation = "https://github.com/oswaldoooo/bws-rs"
+repository = "https://github.com/oswaldoooo/bws-rs"
+readme = "readme.md"
+license = "MIT"
 [dependencies]
 axum = { version = "0.8.4", features = ["macros"] }
 axum-core = "0.5.2"
