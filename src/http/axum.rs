@@ -682,12 +682,8 @@ mod bucket {
 mod itest {
     use std::sync::Arc;
 
-    use axum::response::IntoResponse;
     use tokio::io::AsyncReadExt;
 
-    async fn test_fn(_req: axum::extract::Request) -> impl axum::response::IntoResponse {
-        (axum::http::StatusCode::BAD_REQUEST, b"").into_response()
-    }
     #[derive(Default)]
     struct Target {}
     use crate::service::s3::*;

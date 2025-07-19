@@ -63,12 +63,4 @@ func TestCreateBucket(t *testing.T) {
 	if string(content) != "hello" {
 		t.Fatal("expect hello got [" + string(content) + "]")
 	}
-
-	// bktinfo := creds.ListObjects(context.Background(), "test", minio.ListObjectsOptions{})
-	// if err != nil {
-	// 	t.Fatal(err)
-	// }
-	// for bkt := range bktinfo {
-	// 	t.Log(bkt)
-	// }
 }

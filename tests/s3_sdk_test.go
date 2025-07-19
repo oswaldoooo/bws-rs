@@ -89,6 +89,4 @@ func TestS3Sdk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// cli.AbortMultipartUpload(context.Background(), &s3.AbortMultipartUploadInput{})
-	// cli.GetObject()
 }
