@@ -1,7 +1,7 @@
 pub mod authorization;
 pub mod error;
 pub mod service;
-mod utils;
+pub mod utils;
 pub mod http;
 pub type GenericResult<T> = Result<T, String>;
 #[cfg(target_family = "unix")]
